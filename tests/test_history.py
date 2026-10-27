@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from astrbot.core.message.components import Image, Plain, Reply
-from mingle_tests_plugin.history import ChatHistory
-from mingle_tests_plugin.settings import Settings
+from mingle_tests_plugin.src.history import ChatHistory
+from mingle_tests_plugin.src.settings import Settings
 
 
 class Event:

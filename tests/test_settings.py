@@ -1,5 +1,5 @@
 import pytest
-from mingle_tests_plugin.settings import Settings
+from mingle_tests_plugin.src.settings import Settings
 
 
 @pytest.mark.parametrize(

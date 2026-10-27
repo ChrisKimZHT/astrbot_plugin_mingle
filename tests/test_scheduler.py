@@ -4,8 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from mingle_tests_plugin.scheduler import ChatScheduler
-from mingle_tests_plugin.settings import Settings
+from mingle_tests_plugin.src.scheduler import ChatScheduler
+from mingle_tests_plugin.src.settings import Settings
 
 
 class Event:

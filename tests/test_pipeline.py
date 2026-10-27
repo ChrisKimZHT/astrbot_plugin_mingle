@@ -19,11 +19,11 @@ from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.platform_metadata import PlatformMetadata
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.filter.command import CommandFilter
-from mingle_tests_plugin.decision import ReplyJudge
-from mingle_tests_plugin.history import ChatHistory
 from mingle_tests_plugin.main import MinglePlugin
-from mingle_tests_plugin.scheduler import ChatScheduler
-from mingle_tests_plugin.settings import Settings
+from mingle_tests_plugin.src.decision import ReplyJudge
+from mingle_tests_plugin.src.history import ChatHistory
+from mingle_tests_plugin.src.scheduler import ChatScheduler
+from mingle_tests_plugin.src.settings import Settings
 
 
 def make_event(number="1", private=False):

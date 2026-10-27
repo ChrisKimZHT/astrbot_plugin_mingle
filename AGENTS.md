@@ -15,10 +15,13 @@
 
 - `main.py` owns AstrBot registration, command bypass, request construction,
   response hooks, and history/image tools.
-- `scheduler.py` owns one pending queue and one active turn per unified session.
+- Keep business modules in the `src/` package. The root `main.py` remains the
+  AstrBot entry point and uses relative imports from `.src`. Keep tests in the
+  root `tests/` directory and import business modules through the `src` package.
+- `src/scheduler.py` owns one pending queue and one active turn per unified session.
   It merges consecutive messages, bounds the merge wait and pending event count,
   applies proactive cooldown, and waits for the admitted handler to finish.
-- `decision.py` calls a judgment provider without tools. An empty provider ID
+- `src/decision.py` calls a judgment provider without tools. An empty provider ID
   follows AstrBot's current session provider; another configured provider may be
   selected in the plugin settings. Invalid decisions and failures mean silence.
 - Resolve the judgment persona with AstrBot's `resolve_selected_persona`, using
@@ -34,9 +37,9 @@
   verbatim, without trimming, interpolation, or an implicit separator. Append
   the persona block afterwards; chat history stays in the separate user input.
   Keep the schema default synchronized with `DEFAULT_JUDGE_PROMPT` in settings.
-- `history.py` owns an independent SQLite database and image cache under
+- `src/history.py` owns an independent SQLite database and image cache under
   `StarTools.get_data_dir("astrbot_plugin_mingle")`.
-- `settings.py` validates immutable runtime settings. `_conf_schema.json` exposes
+- `src/settings.py` validates immutable runtime settings. `_conf_schema.json` exposes
   these settings in AstrBot's configuration UI.
 - Group sessions must be explicitly listed. Prefer full UMO identifiers; bare
   group IDs are supported. Empty group configuration enables no group chats.

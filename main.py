@@ -16,10 +16,10 @@ from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from .decision import ReplyJudge
-from .history import ChatHistory
-from .scheduler import ChatScheduler
-from .settings import Settings
+from .src.decision import ReplyJudge
+from .src.history import ChatHistory
+from .src.scheduler import ChatScheduler
+from .src.settings import Settings
 
 
 class MinglePlugin(Star):
