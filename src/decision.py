@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from astrbot.api.event import AstrMessageEvent
@@ -10,6 +12,13 @@ from astrbot.api.star import Context
 
 from .debug import DebugDumper
 from .settings import Settings
+
+
+@dataclass(frozen=True)
+class ReplyDecision:
+    should_reply: bool = False
+    action: Literal["wait", "rerun", "stop"] = "wait"
+    reason: str = ""
 
 
 class ReplyJudge:
@@ -25,16 +34,53 @@ class ReplyJudge:
         self.logger = logger
         self.debug = debug
 
-    async def should_reply(self, event: AstrMessageEvent, messages: list[dict]) -> bool:
+    async def should_reply(
+        self,
+        event: AstrMessageEvent,
+        messages: list[dict],
+        *,
+        message_status: dict | None = None,
+        new_message_ids: list[int] | None = None,
+    ) -> bool:
+        """Return an idle-session reply decision.
+
+        Args:
+            event: Event used to resolve the session's provider and persona.
+            messages: Recent chronological chat records.
+            message_status: Live scheduling state indexed by message record IDs.
+            new_message_ids: Records triggering this evaluation.
+
+        Returns:
+            Whether the model explicitly permits a reply.
+        """
+        return (
+            await self.evaluate(
+                event,
+                messages,
+                message_status=message_status,
+                new_message_ids=new_message_ids,
+            )
+        ).should_reply
+
+    async def evaluate(
+        self,
+        event: AstrMessageEvent,
+        messages: list[dict],
+        *,
+        new_message_ids: list[int] | None = None,
+        message_status: dict | None = None,
+    ) -> ReplyDecision:
         """Ask a configured provider whether joining the conversation is useful.
 
         Args:
             event: Event used to resolve the current session's default provider.
             messages: Recent chronological chat records, treated as untrusted data.
+            new_message_ids: Records whose arrival triggered this evaluation.
+            message_status: Finished, active, queued, and pending record IDs.
 
         Returns:
-            Whether a valid model decision explicitly permits a reply. Failures
-            and malformed responses leave the bot silent.
+            A validated reply and interruption decision. Failures and malformed
+            responses never request interruption.
         """
         request_id = None
         try:
@@ -91,13 +137,18 @@ class ReplyJudge:
                 )
                 display_timezone = timezone.utc
             judgment_messages = []
+            status_data = message_status or {}
+            new_ids = set(new_message_ids or status_data.get("judging", []))
+            processing_ids = set(status_data.get("active", []))
+            queued_ids = set(status_data.get("queued", []))
+            include_status = message_status is not None or new_message_ids is not None
             for message in messages:
                 # Short IDs are display labels only; keep stored identities and
                 # history-tool records intact for authorization and lookups.
                 record = {
                     key: value
                     for key, value in message.items()
-                    if key != "platform_message_id"
+                    if key not in {"platform_message_id", "is_new", "sent_to_agent"}
                 }
                 if "timestamp" in record:
                     try:
@@ -108,8 +159,24 @@ class ReplyJudge:
                         record["timestamp"] = None
                 if record.get("sender_id") is not None:
                     record["sender_id"] = str(record["sender_id"])[-8:]
+                if include_status:
+                    record_id = record.get("id")
+                    if record_id in new_ids:
+                        record["status"] = "new"
+                    elif record_id in processing_ids:
+                        record["status"] = "processing"
+                    elif record_id in queued_ids:
+                        record["status"] = "queued"
+                    else:
+                        # History means context only, not proof of a sent reply.
+                        record["status"] = "history"
                 judgment_messages.append(record)
-            prompt = json.dumps(judgment_messages, ensure_ascii=False)
+            prompt_data = judgment_messages
+            if include_status:
+                prompt_data = {
+                    "messages": judgment_messages,
+                }
+            prompt = json.dumps(prompt_data, ensure_ascii=False)
             request_id = uuid.uuid4().hex
             if self.debug is not None:
                 await self.debug.dump(
@@ -146,7 +213,22 @@ class ReplyJudge:
             if text.startswith("```") and text.endswith("```"):
                 text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             result = json.loads(text)
-            return isinstance(result, dict) and result.get("should_reply") is True
+            if not isinstance(result, dict) or not isinstance(
+                result.get("should_reply"), bool
+            ):
+                return ReplyDecision()
+            action = result.get("action", "wait")
+            if action not in {"wait", "rerun", "stop"}:
+                return ReplyDecision()
+            if (action == "rerun" and not result["should_reply"]) or (
+                action == "stop" and result["should_reply"]
+            ):
+                return ReplyDecision()
+            return ReplyDecision(
+                should_reply=result["should_reply"],
+                action=action,
+                reason=str(result.get("reason", "")),
+            )
         except Exception as exc:
             if self.debug is not None and request_id is not None:
                 await self.debug.dump(
@@ -164,4 +246,4 @@ class ReplyJudge:
                 event.unified_msg_origin,
                 exc_info=True,
             )
-            return False
+            return ReplyDecision()

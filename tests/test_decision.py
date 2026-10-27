@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from mingle_tests_plugin.src.decision import ReplyJudge
+from mingle_tests_plugin.src.decision import ReplyDecision, ReplyJudge
 from mingle_tests_plugin.src.settings import Settings
 
 
@@ -219,3 +219,73 @@ async def test_invalid_timezone_falls_back_to_readable_utc(context, event):
         json.loads(context.llm_generate.call_args.kwargs["prompt"])[0]["timestamp"]
         == "1970-01-01 00:00:00+00:00"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result, expected",
+    [
+        ({"should_reply": True, "action": "rerun"}, ReplyDecision(True, "rerun")),
+        ({"should_reply": False, "action": "stop"}, ReplyDecision(False, "stop")),
+        ({"should_reply": True, "action": "wait"}, ReplyDecision(True)),
+        ({"should_reply": True}, ReplyDecision(True)),
+        ({"should_reply": True, "action": "stop"}, ReplyDecision()),
+        ({"should_reply": False, "action": "rerun"}, ReplyDecision()),
+        ({"should_reply": "true", "action": "rerun"}, ReplyDecision()),
+        ({"should_reply": True, "action": "interrupt"}, ReplyDecision()),
+    ],
+)
+async def test_busy_decisions_are_validated_before_control_actions(
+    context, event, result, expected
+):
+    context.llm_generate.return_value.completion_text = json.dumps(result)
+    judge = ReplyJudge(context, Settings(), logging.getLogger())
+    actual = await judge.evaluate(
+        event, [], message_status={"active": [1]}, new_message_ids=[2]
+    )
+    assert actual == expected
+
+
+@pytest.mark.asyncio
+async def test_busy_context_is_explicit_without_changing_the_system_prefix(
+    context, event
+):
+    judge = ReplyJudge(context, Settings(), logging.getLogger())
+    await judge.should_reply(event, [])
+    original = context.llm_generate.call_args.kwargs["system_prompt"]
+    status = {
+        "finished": [{"id": 1, "outcome": "completed"}],
+        "active": [2],
+        "queued": [3],
+        "awaiting_judgment": [5],
+        "judging": [4],
+    }
+    await judge.evaluate(
+        event,
+        [{"id": number, "text": f"Message {number}"} for number in range(6)],
+        new_message_ids=[4],
+        message_status=status,
+    )
+    request = context.llm_generate.call_args.kwargs
+    assert request["system_prompt"] == original
+    payload = json.loads(request["prompt"])
+    assert "message_status" not in payload
+    assert "new_message_ids" not in payload
+    assert "running_agent" not in payload
+    records = {item["id"]: item for item in payload["messages"]}
+    assert [records[number]["status"] for number in range(6)] == [
+        "history",
+        "history",
+        "processing",
+        "queued",
+        "new",
+        "history",
+    ]
+    assert all(
+        "is_new" not in item and "sent_to_agent" not in item
+        for item in payload["messages"]
+    )
+    assert [item["id"] for item in payload["messages"] if item["status"] == "new"] == [
+        4
+    ]
+    assert records[4]["text"] == "Message 4"

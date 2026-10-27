@@ -117,6 +117,20 @@ class MinglePlugin(Star):
                 self.scheduler.judge.settings = self.settings
                 self.history.settings = self.settings
                 self.debug_dumper.settings = self.settings
+                if state == "off":
+                    for session_state in self.scheduler.sessions.values():
+                        for ticket in (
+                            session_state.pending
+                            + session_state.approved
+                            + session_state.judging
+                        ):
+                            current = ticket.event
+                            current_group = f"{current.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{current.get_group_id()}"
+                            if (
+                                current_group == group_session
+                                and not ticket.ready.done()
+                            ):
+                                ticket.ready.set_result(None)
                 self.logger.info(
                     "Mingle group allowlist updated for %s: %s", group_session, state
                 )
@@ -289,6 +303,15 @@ class MinglePlugin(Star):
                 "mingle_view_image to inspect an available image by record ID and image index.\n"
                 + json.dumps(recent, ensure_ascii=False)
             )
+            if event.get_extra("mingle_resume_after_rerun", False):
+                prompt = (
+                    "The previous Agent turn was stopped because new messages corrected "
+                    "or redirected the task. Continue from its saved history, apply the "
+                    "new messages below, and reuse completed tool results when relevant.\n\n"
+                    + prompt
+                )
+            if event.get_extra("agent_stop_requested", False):
+                return
             event.set_extra("mingle_turn_id", uuid.uuid4().hex)
             event.set_extra("mingle_agent_started", True)
             self.logger.debug(

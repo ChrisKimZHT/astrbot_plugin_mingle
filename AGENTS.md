@@ -18,14 +18,17 @@
 - Keep business modules in the `src/` package. The root `main.py` remains the
   AstrBot entry point and uses relative imports from `.src`. Keep tests in the
   root `tests/` directory and import business modules through the `src` package.
-- `src/scheduler.py` owns one pending queue and one active turn per unified session.
-  It merges consecutive messages, bounds the merge wait and pending event count,
-  applies proactive cooldown, and waits for the admitted handler to finish.
+- `src/scheduler.py` owns separate judgment and execution tasks per unified
+  session. Judgment merges and evaluates new arrivals while one Agent runs;
+  approved batches queue for execution after the active handler fully unwinds.
+  Bound both pending and approved event queues and the merge wait.
 - Proactive cooldown defaults to zero so normal conversation continues through
   the judgment model after the two-second merge window. A positive configured
   cooldown intentionally saves but skips ordinary messages during that period;
   it does not schedule a retry when the period expires. Private and explicit
-  wake messages bypass cooldown. Do not reintroduce a long default silence.
+  wake messages bypass cooldown. Busy-session judgment also bypasses cooldown
+  so corrections and stop requests can be detected. Do not reintroduce a long
+  default silence.
 - `src/decision.py` calls a judgment provider without tools. An empty provider ID
   follows AstrBot's current session provider; another configured provider may be
   selected in the plugin settings. Invalid decisions and failures mean silence.
@@ -97,8 +100,9 @@
   settings. On failure restore the in-memory config. Waiting events recheck
   the allowlist before requesting an Agent; active turns are not interrupted.
 - Private messages are enabled by default and use the same scheduler. WebChat
-  remains on its native flow. Private messages and explicit wake/mention events
-  bypass the judgment model and proactive cooldown.
+  remains on its native flow. When idle, private and explicit wake/mention
+  events bypass judgment and cooldown. While busy, evaluate them for control
+  actions too, but preserve their reply admission unless the action is stop.
 - Recognized command handlers, including management commands, retain their
   native flow. Other ordinary message handlers do not execute after Mingle has
   taken ownership of a message. LLM hooks and normal result decoration remain
@@ -112,10 +116,31 @@
   framework history saving. Its finally block releases the batch and stops the
   default fallback. `should_call_llm(True)` disables fallback in this AstrBot
   version; it does not disable the yielded ProviderRequest.
-- New messages received during a turn are persisted immediately and queued.
-  They can be read through the history tool while the turn is running. They do
-  not automatically steer or cancel the running Agent. Cross-sender follow-up
-  and interruption/restart policies are deferred.
+- New arrivals are persisted immediately and evaluated in parallel with the
+  active Agent. `should_reply` plus `action=wait` queues ordinary follow-ups;
+  `action=rerun` requires should_reply=true, requests stopping the active turn,
+  then starts a continuation after its pipeline completes history saving.
+  `action=stop` requires should_reply=false and discards approved waiting work
+  without creating a replacement. Invalid, failed or timed-out decisions never
+  request stop/rerun. Legacy decisions without action default to wait. Custom
+  judgment prompts must implement the wait/rerun/stop protocol to control runs.
+- Stop only the snapshotted active event using `agent_stop_requested`, which
+  AstrBot's runner watcher consumes. Do not call stop_event or cancel the old
+  pipeline for normal rerun/stop: history saving must finish. Recheck active
+  event identity after judgment; a late result cannot stop a newer turn. Do not
+  patch same-sender follow-up capture or stop every event in the shared session.
+- Judgment user input includes only messages. Each supplied message
+  has only one scheduling field, status: new (this judgment's input), queued
+  (reply approved), processing (active Agent batch), or history (other context).
+  Do not send per-message is_new/sent_to_agent flags or top-level
+  new_message_ids/message_status lists. History includes completed, interrupted,
+  skipped and untracked records; it does not claim a successful reply.
+  Keep detailed outcomes internal to the scheduler. Supplement recent history
+  with retained active-batch records from SQLite when outside the recent window.
+  Annotate copies without mutating stored history.
+  Finish outcomes are bounded runtime metadata, not
+  a durable audit log; older/untracked records must not be claimed completed.
+  Dynamic status stays out of the stable system prefix.
 - AstrBot session isolation is respected. To share a group's conversation across
   members, disable its `unique_session` option. Do not override isolation here.
 - Register the two Mingle tools normally. If a persona restricts its tools,

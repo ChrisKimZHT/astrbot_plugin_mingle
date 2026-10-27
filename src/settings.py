@@ -9,7 +9,21 @@ DEFAULT_JUDGE_PROMPT = (
     "message. If the latest user message is clearly unfinished, such as an "
     "incomplete sentence or a thought being sent in multiple parts, return "
     "should_reply=false and wait for the remaining messages. "
-    'Return only JSON: {"should_reply": true/false, '
+    "The input contains a messages list. Each message "
+    "has one status: new means assess it in this judgment; queued means a reply "
+    "is already approved and waiting; processing means the running Agent is "
+    "handling it; history means context only, not proof of a successful reply. "
+    "Assess only status=new messages. Do not judge queued or processing messages "
+    "again. Use history to understand the conversation, and compare new messages "
+    "with status=processing messages when deciding whether to rerun the task. Use "
+    "action=wait for ordinary follow-ups that can wait; should_reply indicates "
+    "whether they need a later reply. Use action=rerun with should_reply=true "
+    "only for an important correction or explicit redirection that invalidates "
+    "the current work. Use action=stop with should_reply=false only when users "
+    "explicitly ask the running task to stop without a replacement reply. "
+    "Unrelated chatter and unfinished messages must never interrupt an Agent. "
+    "When no message has status=processing, use action=wait. "
+    'Return only JSON: {"should_reply": true/false, "action": "wait|rerun|stop", '
     '"reason": "brief explanation"}.'
 )
 

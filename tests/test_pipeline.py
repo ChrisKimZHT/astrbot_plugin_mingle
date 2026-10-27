@@ -196,6 +196,93 @@ async def test_default_pipeline_finishes_history_before_next_turn(plugin):
 
 
 @pytest.mark.asyncio
+async def test_rerun_uses_framework_stop_signal_and_saves_before_replacement(plugin):
+    from astrbot.core.astr_agent_run_util import _watch_agent_stop_signal
+
+    plugin.context.llm_generate.return_value = LLMResponse(
+        role="assistant", completion_text='{"should_reply": true, "action": "rerun"}'
+    )
+    first_started = asyncio.Event()
+    stop_received = asyncio.Event()
+    history_saved = []
+    requests = []
+
+    class PluginDispatch:
+        async def process(self, event):
+            async for value in call_handler(event, plugin.on_message):
+                yield value
+
+    class RunningAgent:
+        def done(self):
+            return stop_received.is_set()
+
+        def request_stop(self):
+            stop_received.set()
+
+    class Agent:
+        async def process(self, event):
+            request = event.get_extra("provider_request")
+            requests.append(request)
+            if event.message_obj.message_id == "1":
+                first_started.set()
+                watcher = asyncio.create_task(
+                    _watch_agent_stop_signal(RunningAgent(), event)
+                )
+                try:
+                    await asyncio.wait_for(stop_received.wait(), 2)
+                    assert not event.is_stopped()
+                    event.set_extra("agent_user_aborted", True)
+                    history_saved.append("1")
+                finally:
+                    watcher.cancel()
+                    await asyncio.gather(watcher, return_exceptions=True)
+                return
+            assert history_saved == ["1"]
+            assert "previous Agent turn was stopped" in request.prompt
+            event.set_result(event.plain_result("Corrected answer"))
+            yield
+            history_saved.append("2")
+
+    class Respond:
+        async def process(self, event):
+            await asyncio.sleep(0)
+
+    process = ProcessStage()
+    process.ctx = SimpleNamespace(
+        astrbot_config={"provider_settings": {"enable": True}}
+    )
+    process.star_request_sub_stage = PluginDispatch()
+    process.agent_sub_stage = Agent()
+    pipeline = object.__new__(PipelineScheduler)
+    pipeline.stages = [process, Respond()]
+    first, second = make_event("1", private=True), make_event("2", private=True)
+    for event in (first, second):
+        event.set_extra("activated_handlers", [SimpleNamespace(event_filters=[])])
+        event.is_at_or_wake_command = True
+    first_task = asyncio.create_task(pipeline._process_stages(first))
+    await asyncio.wait_for(first_started.wait(), 1)
+    second_task = asyncio.create_task(pipeline._process_stages(second))
+    try:
+        await asyncio.wait_for(asyncio.gather(first_task, second_task), 3)
+        assert history_saved == ["1", "2"]
+        assert len(requests) == 2
+        assert first.get_extra("agent_stop_requested") is True
+        assert second.get_extra("mingle_resume_after_rerun") is True
+        judgment = json.loads(plugin.context.llm_generate.call_args.kwargs["prompt"])
+        assert any(item["status"] == "processing" for item in judgment["messages"])
+        assert any(item["status"] == "new" for item in judgment["messages"])
+        assert "running_agent" not in judgment
+        assert any(
+            item["status"] == "processing" and item["text"] == "message 1"
+            for item in judgment["messages"]
+        )
+    finally:
+        first_task.cancel()
+        second_task.cancel()
+        await asyncio.gather(first_task, second_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_completed_responses_are_recorded_once(plugin):
     event = make_event()
     event.set_extra("mingle_turn_id", "turn")
@@ -429,3 +516,46 @@ async def test_agent_debug_hooks_create_nothing_when_disabled(plugin):
         event, LLMResponse(role="assistant", completion_text="answer")
     )
     assert not plugin.debug_dumper.directory.exists()
+
+
+@pytest.mark.asyncio
+async def test_group_off_during_busy_judgment_does_not_stop_active_agent(plugin):
+    from mingle_tests_plugin.src.decision import ReplyDecision
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def evaluate(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return ReplyDecision(True, "rerun")
+
+    plugin.scheduler.judge.evaluate = evaluate
+    first = make_event("1")
+    first.is_at_or_wake_command = True
+    first_handler = plugin.on_message(first)
+    await asyncio.wait_for(anext(first_handler), 1)
+    second_task = asyncio.create_task(anext(plugin.on_message(make_event("2"))))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        [value async for value in plugin.manage_group(make_event("command"), "off")]
+        release.set()
+        await asyncio.wait_for(
+            plugin.scheduler.sessions[first.unified_msg_origin].task, 1
+        )
+        result = await asyncio.gather(second_task, return_exceptions=True)
+        assert isinstance(result[0], StopAsyncIteration)
+        assert not first.get_extra("agent_stop_requested", False)
+    finally:
+        release.set()
+        second_task.cancel()
+        await asyncio.gather(second_task, return_exceptions=True)
+        await first_handler.aclose()
+
+
+@pytest.mark.asyncio
+async def test_history_tool_returns_stored_records(plugin):
+    event = make_event()
+    event.set_extra("mingle_managed", True)
+    first_id = await plugin.history.record(event, event.get_messages())
+    result = json.loads(await plugin.chat_history(event))
+    assert result["messages"][0]["id"] == first_id
