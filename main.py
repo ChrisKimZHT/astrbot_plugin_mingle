@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import json
 import uuid
 from collections.abc import AsyncGenerator
@@ -14,14 +13,15 @@ from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.filter.command import CommandFilter, GreedyStr
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.session_llm_manager import SessionServiceManager
-from mcp.types import CallToolResult, ImageContent, TextContent
+from mcp.types import CallToolResult
 
 from .src.debug import DebugDumper
 from .src.decision import ReplyJudge
 from .src.history import ChatHistory
-from .src.images import prepare_image
 from .src.scheduler import ChatScheduler
 from .src.settings import Settings
+from .src.tools import history as history_tools
+from .src.tools import images as image_tools
 
 
 class MinglePlugin(Star):
@@ -517,22 +517,14 @@ class MinglePlugin(Star):
         Returns:
             JSON records and cursor boundaries for the current session only.
         """
-        if not self.available or not event.get_extra("mingle_managed", False):
-            return json.dumps(
-                {"error": "Mingle history is unavailable in this execution"}
-            )
-        if limit < 1 or limit > 100 or before_id < 0 or after_id < 0:
-            return json.dumps({"error": "Invalid limit or cursor"})
-        records = await self.history.get(
-            event.unified_msg_origin, limit, before_id, after_id, keyword
-        )
-        return json.dumps(
-            {
-                "messages": records,
-                "oldest_id": records[0]["id"] if records else None,
-                "newest_id": records[-1]["id"] if records else None,
-            },
-            ensure_ascii=False,
+        return await history_tools.chat_history(
+            event,
+            self.history,
+            available=self.available,
+            limit=limit,
+            before_id=before_id,
+            after_id=after_id,
+            keyword=keyword,
         )
 
     @filter.llm_tool(name="mingle_view_image")
@@ -548,36 +540,13 @@ class MinglePlugin(Star):
         Returns:
             Image content for the model, or an explicit unavailable result.
         """
-        image = None
-        if self.available and event.get_extra("mingle_managed", False):
-            image = await self.history.read_image(
-                event.unified_msg_origin, record_id, image_index
-            )
-        if image is None:
-            return CallToolResult(
-                content=[
-                    TextContent(
-                        type="text",
-                        text="Image unavailable, expired, or outside the current session.",
-                    )
-                ]
-            )
-        data, mime = image
-        try:
-            data, mime = await prepare_image(data, mime)
-        except Exception:
-            self.logger.exception(
-                "Failed to prepare Mingle image for record %s", record_id
-            )
-            return CallToolResult(
-                content=[TextContent(type="text", text="Image preparation failed.")],
-                isError=True,
-            )
-        encoded = await asyncio.to_thread(base64.b64encode, data)
-        return CallToolResult(
-            content=[
-                ImageContent(type="image", data=encoded.decode("ascii"), mimeType=mime)
-            ]
+        return await image_tools.view_image(
+            event,
+            self.history,
+            self.logger,
+            available=self.available,
+            record_id=record_id,
+            image_index=image_index,
         )
 
     async def terminate(self) -> None:

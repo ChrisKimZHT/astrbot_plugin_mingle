@@ -714,7 +714,7 @@ async def test_view_image_reports_preparation_failure_without_returning_original
         plugin.history, "read_image", AsyncMock(return_value=(b"invalid", "image/jpeg"))
     )
     monkeypatch.setattr(
-        "mingle_tests_plugin.main.prepare_image",
+        "mingle_tests_plugin.src.tools.images.prepare_image",
         AsyncMock(side_effect=ValueError("invalid image")),
     )
     result = await plugin.view_image(event, 1)

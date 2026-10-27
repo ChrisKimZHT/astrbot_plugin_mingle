@@ -14,7 +14,13 @@
 ## Message and Agent flow
 
 - `main.py` owns AstrBot registration, command bypass, request construction,
-  response hooks, and history/image tools.
+  response hooks, and thin history/image tool registration methods.
+- `src/tools/history.py` and `src/tools/images.py` implement Mingle-required
+  function-calling tools. Keep tool names, signatures and model-facing docstrings
+  on the registered main.py methods; delegate execution with explicit dependencies.
+  Storage stays in src/history.py and image preprocessing in src/images.py.
+  Reserve a root-level toolbox/ for optional general-purpose model tools when
+  requested; Mingle core must not depend on that optional toolbox.
 - Keep business modules in the `src/` package. The root `main.py` remains the
   AstrBot entry point and uses relative imports from `.src`. Keep tests in the
   root `tests/` directory and import business modules through the `src` package.
