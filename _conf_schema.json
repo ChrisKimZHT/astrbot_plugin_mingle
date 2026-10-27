@@ -1,0 +1,93 @@
+{
+  "enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "启用 Mingle",
+    "hint": "统一调度配置范围内的聊天。"
+  },
+  "group_sessions": {
+    "type": "list",
+    "default": [],
+    "description": "生效群聊",
+    "hint": "填写完整 UMO（推荐）或群 ID；空列表不接管任何群聊。"
+  },
+  "private_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "接管私聊",
+    "hint": "私聊绕过接话判断；WebChat 保持原流程。"
+  },
+  "judge_provider_id": {
+    "type": "string",
+    "default": "",
+    "description": "接话判断模型",
+    "hint": "留空跟随当前会话 Agent 默认模型，也可选择其他提供商配置。",
+    "_special": "select_provider"
+  },
+  "judge_timeout": {
+    "type": "float",
+    "default": 20.0,
+    "description": "判断超时（秒）",
+    "hint": "判断失败或超时保持安静；不影响私聊和直接唤醒。"
+  },
+  "debounce_seconds": {
+    "type": "float",
+    "default": 2.0,
+    "description": "连续消息合并等待（秒）",
+    "hint": "消息短暂安静后处理同一批输入。"
+  },
+  "max_wait_seconds": {
+    "type": "float",
+    "default": 8.0,
+    "description": "最长合并等待（秒）",
+    "hint": "避免活跃会话无限等待，须不小于合并等待。"
+  },
+  "cooldown_seconds": {
+    "type": "float",
+    "default": 60.0,
+    "description": "主动接话冷却（秒）",
+    "hint": "只限制普通群聊主动接话，私聊和直接唤醒不受限制。"
+  },
+  "recent_messages": {
+    "type": "int",
+    "default": 30,
+    "description": "近期上下文条数",
+    "hint": "最多 100 条；更早及更新内容可通过历史工具查询。"
+  },
+  "max_pending_messages": {
+    "type": "int",
+    "default": 100,
+    "description": "每会话等待事件上限",
+    "hint": "超过上限时合并较早事件；记录仍保存在数据库。"
+  },
+  "retention_days": {
+    "type": "int",
+    "default": 30,
+    "description": "消息保留天数",
+    "hint": "仅清理插件独立数据库。"
+  },
+  "max_messages_per_session": {
+    "type": "int",
+    "default": 10000,
+    "description": "每会话消息记录上限",
+    "hint": "超出时删除该会话最早记录。"
+  },
+  "image_retention_days": {
+    "type": "int",
+    "default": 7,
+    "description": "图片缓存保留天数",
+    "hint": "过期后保留消息及附件已失效的状态。"
+  },
+  "image_cache_mb": {
+    "type": "int",
+    "default": 512,
+    "description": "图片缓存总容量（MB）",
+    "hint": "按最近收到时间淘汰；启动及每五分钟执行清理。"
+  },
+  "max_image_mb": {
+    "type": "int",
+    "default": 20,
+    "description": "单张图片缓存上限（MB）",
+    "hint": "超过上限只保留图片不可用标记。"
+  }
+}

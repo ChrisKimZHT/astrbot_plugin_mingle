@@ -1,0 +1,337 @@
+import asyncio
+import hashlib
+import json
+import logging
+import time
+import uuid
+from pathlib import Path
+
+import aiosqlite
+from astrbot.api.event import AstrMessageEvent
+from astrbot.core.message.components import (
+    At,
+    BaseMessageComponent,
+    Image,
+    Plain,
+    Reply,
+)
+from astrbot.core.utils.media_utils import detect_image_mime_type_async
+
+from .settings import Settings
+
+
+class ChatHistory:
+    """Own chat records and bounded, content-addressed image storage."""
+
+    def __init__(
+        self, directory: Path, settings: Settings, logger: logging.Logger
+    ) -> None:
+        self.directory = directory
+        self.images = directory / "images"
+        self.settings = settings
+        self.logger = logger
+        self.db: aiosqlite.Connection | None = None
+        self.lock = asyncio.Lock()
+        self.image_lock = asyncio.Lock()
+
+    async def initialize(self) -> None:
+        """Create plugin-owned storage and indexes without changing AstrBot tables."""
+        self.images.mkdir(parents=True, exist_ok=True)
+        self.db = await aiosqlite.connect(self.directory / "history.sqlite3")
+        self.db.row_factory = aiosqlite.Row
+        await self.db.executescript("""
+            PRAGMA journal_mode=WAL;
+            PRAGMA busy_timeout=5000;
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                sender_id TEXT NOT NULL,
+                sender_name TEXT NOT NULL,
+                role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                reply_to TEXT,
+                images TEXT NOT NULL,
+                UNIQUE(session, source_key)
+            );
+            CREATE INDEX IF NOT EXISTS messages_session_id ON messages(session, id);
+            CREATE INDEX IF NOT EXISTS messages_timestamp ON messages(timestamp);
+            CREATE TABLE IF NOT EXISTS images (
+                digest TEXT PRIMARY KEY,
+                mime TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                last_seen REAL NOT NULL
+            );
+            PRAGMA user_version=1;
+        """)
+        await self.db.commit()
+
+    async def record(
+        self,
+        event: AstrMessageEvent,
+        chain: list[BaseMessageComponent],
+        role: str = "user",
+        source_key: str = "",
+    ) -> int | None:
+        """Persist a normalized message and cache incoming images before event cleanup.
+
+        Args:
+            event: Original event defining the session and sender identity.
+            chain: Message components in platform order.
+            role: Either user or bot.
+            source_key: Optional stable identity for deduplicating output hooks.
+
+        Returns:
+            Inserted record ID, or None for an empty or duplicate message.
+        """
+        parts, images = [], []
+        reply_to = None
+        for component in chain:
+            if isinstance(component, Plain):
+                parts.append(component.text)
+            elif isinstance(component, At):
+                parts.append(f"@{component.name or component.qq}")
+            elif isinstance(component, Reply):
+                reply_to = str(component.id)
+                parts.append(f"[reply to {reply_to}: {component.message_str or ''}]")
+            elif isinstance(component, Image):
+                digest = None
+                try:
+                    path = Path(await component.convert_to_file_path())
+                    async with self.image_lock:
+                        mime = await detect_image_mime_type_async(
+                            str(path), default_mime_type=None
+                        )
+                        if not mime or not mime.startswith("image/"):
+                            raise ValueError("Unsupported image content")
+
+                        def copy_image():
+                            # Limit reads too: a file can grow after the size check.
+                            with path.open("rb") as stream:
+                                data = stream.read(
+                                    self.settings.max_image_mb * 1024 * 1024 + 1
+                                )
+                            if len(data) > self.settings.max_image_mb * 1024 * 1024:
+                                raise ValueError(
+                                    "Image exceeds the per-file cache limit"
+                                )
+                            digest = hashlib.sha256(data).hexdigest()
+                            target = self.images / digest
+                            if not target.exists():
+                                temporary = (
+                                    self.images / f"{digest}.{uuid.uuid4().hex}.tmp"
+                                )
+                                try:
+                                    temporary.write_bytes(data)
+                                    temporary.replace(target)
+                                finally:
+                                    temporary.unlink(missing_ok=True)
+                            return digest, len(data)
+
+                        digest, size = await asyncio.to_thread(copy_image)
+                        async with self.lock:
+                            await self.db.execute(
+                                "INSERT INTO images VALUES (?, ?, ?, ?) "
+                                "ON CONFLICT(digest) DO UPDATE SET last_seen=excluded.last_seen",
+                                (digest, mime, size, time.time()),
+                            )
+                            await self.db.commit()
+                except Exception:
+                    self.logger.warning(
+                        "Image caching failed for session %s",
+                        event.unified_msg_origin,
+                        exc_info=True,
+                    )
+                images.append(digest)
+                parts.append(
+                    f"[image {len(images) - 1}: {'available' if digest else 'unavailable'}]"
+                )
+            else:
+                parts.append(f"[{component.type.value}]")
+        text = " ".join(parts).strip()[:8000]
+        if not text:
+            return None
+        sender_id = event.get_self_id() if role == "bot" else event.get_sender_id()
+        sender_name = "bot" if role == "bot" else event.get_sender_name()
+        if not source_key:
+            message_id = str(getattr(event.message_obj, "message_id", "") or "")
+            source_key = (
+                f"{role}:{sender_id}:{message_id}" if message_id else uuid.uuid4().hex
+            )
+        async with self.lock:
+            cursor = await self.db.execute(
+                "INSERT OR IGNORE INTO messages "
+                "(session, source_key, timestamp, sender_id, sender_name, role, text, reply_to, images) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.unified_msg_origin,
+                    source_key,
+                    time.time()
+                    if role == "bot"
+                    else getattr(event.message_obj, "timestamp", time.time()),
+                    str(sender_id),
+                    str(sender_name or ""),
+                    role,
+                    text,
+                    reply_to,
+                    json.dumps(images),
+                ),
+            )
+            record_id = cursor.lastrowid if cursor.rowcount == 1 else None
+            await cursor.close()
+            await self.db.execute(
+                "DELETE FROM messages WHERE session=? AND id NOT IN "
+                "(SELECT id FROM messages WHERE session=? ORDER BY id DESC LIMIT ?)",
+                (
+                    event.unified_msg_origin,
+                    event.unified_msg_origin,
+                    self.settings.max_messages_per_session,
+                ),
+            )
+            await self.db.commit()
+        if any(images):
+            await self.cleanup()
+        return record_id
+
+    async def get(
+        self,
+        session: str,
+        limit: int = 30,
+        before_id: int = 0,
+        after_id: int = 0,
+        keyword: str = "",
+    ) -> list[dict]:
+        """Query chronological records using stable, session-scoped cursors.
+
+        Args:
+            session: Authorized session, supplied by the tool environment.
+            limit: Number of records, capped at 100.
+            before_id: Exclusive upper record bound, or zero.
+            after_id: Exclusive lower record bound, or zero.
+            keyword: Optional literal text search.
+
+        Returns:
+            Chronological normalized messages with image availability.
+        """
+        limit = max(1, min(100, int(limit)))
+        query = "SELECT * FROM messages WHERE session=?"
+        values = [session]
+        if before_id:
+            query += " AND id<?"
+            values.append(int(before_id))
+        if after_id:
+            query += " AND id>?"
+            values.append(int(after_id))
+        if keyword:
+            query += " AND instr(lower(text), lower(?)) > 0"
+            values.append(keyword)
+        query += " ORDER BY id " + ("ASC" if after_id else "DESC") + " LIMIT ?"
+        values.append(limit)
+        async with self.lock:
+            async with self.db.execute(query, values) as cursor:
+                rows = await cursor.fetchall()
+        records = []
+        for row in sorted(rows, key=lambda item: item["id"]):
+            record = dict(row)
+            source_key = record.pop("source_key")
+            record["platform_message_id"] = (
+                source_key.split(":", 2)[2]
+                if record["role"] == "user" and source_key.startswith("user:")
+                else None
+            )
+            record.pop("session")
+            record["images"] = [
+                {
+                    "index": index,
+                    "available": bool(digest and (self.images / digest).is_file()),
+                }
+                for index, digest in enumerate(json.loads(record["images"]))
+            ]
+            records.append(record)
+        # Keep tool output and prompt snapshots bounded even for very long posts.
+        budget = 24000
+        for record in reversed(records):
+            record["text"] = record["text"][: max(0, budget)]
+            budget -= len(record["text"])
+        return records
+
+    async def read_image(
+        self, session: str, record_id: int, image_index: int
+    ) -> tuple[bytes, str] | None:
+        """Read a cached image only through a message in the authorized session.
+
+        Args:
+            session: Current session; models cannot override it.
+            record_id: Message record that references the image.
+            image_index: Zero-based image index within that record.
+
+        Returns:
+            Image bytes and MIME type, or None if unavailable or unauthorized.
+        """
+        if image_index < 0:
+            return None
+        async with self.image_lock, self.lock:
+            async with self.db.execute(
+                "SELECT images FROM messages WHERE session=? AND id=?",
+                (session, record_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                return None
+            images = json.loads(row["images"])
+            if image_index >= len(images) or not images[image_index]:
+                return None
+            digest = images[image_index]
+            async with self.db.execute(
+                "SELECT mime FROM images WHERE digest=?", (digest,)
+            ) as cursor:
+                image = await cursor.fetchone()
+            path = self.images / digest
+            if image is None or not path.is_file():
+                return None
+            return await asyncio.to_thread(path.read_bytes), image["mime"]
+
+    async def cleanup(self) -> None:
+        """Expire chat rows and images by age and total image storage size."""
+        now = time.time()
+        async with self.image_lock, self.lock:
+            await self.db.execute(
+                "DELETE FROM messages WHERE timestamp<?",
+                (now - self.settings.retention_days * 86400,),
+            )
+            async with self.db.execute(
+                "SELECT * FROM images ORDER BY last_seen DESC"
+            ) as cursor:
+                rows = await cursor.fetchall()
+            retained = 0
+            for row in rows:
+                keep = (
+                    row["last_seen"] >= now - self.settings.image_retention_days * 86400
+                    and retained + row["size"]
+                    <= self.settings.image_cache_mb * 1024 * 1024
+                )
+                if keep:
+                    retained += row["size"]
+                    continue
+                await asyncio.to_thread(
+                    (self.images / row["digest"]).unlink, missing_ok=True
+                )
+                await self.db.execute(
+                    "DELETE FROM images WHERE digest=?", (row["digest"],)
+                )
+            # A crash between file creation and DB commit can leave unreferenced files.
+            known = {
+                row["digest"] for row in rows if (self.images / row["digest"]).exists()
+            }
+            for path in self.images.iterdir():
+                if path.is_file() and path.name not in known:
+                    await asyncio.to_thread(path.unlink, missing_ok=True)
+            await self.db.commit()
+
+    async def close(self) -> None:
+        """Close the connection after plugin background tasks have stopped."""
+        async with self.lock:
+            if self.db is not None:
+                await self.db.close()
+                self.db = None
