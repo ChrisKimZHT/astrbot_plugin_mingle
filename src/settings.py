@@ -17,6 +17,7 @@ CONFIG_GROUPS = {
     "history": ("recent_messages", "retention_days", "max_messages_per_session"),
     "images": ("image_retention_days", "image_cache_mb", "max_image_mb"),
     "debug": ("debug_sessions",),
+    "toolbox": ("toolbox_enabled", "toolbox_time_enabled"),
 }
 
 DEFAULT_JUDGE_PROMPT = (
@@ -67,6 +68,8 @@ class Settings:
     image_retention_days: int = 7
     image_cache_mb: int = 512
     max_image_mb: int = 20
+    toolbox_enabled: bool = True
+    toolbox_time_enabled: bool = True
 
     @classmethod
     def from_config(cls, config: dict) -> "Settings":
@@ -95,7 +98,12 @@ class Settings:
                 raise ValueError(f"{name} must be a list of session identifiers")
             values[name] = tuple(item.strip() for item in sessions if item.strip())
         settings = cls(**values)
-        for name in ("enabled", "private_enabled"):
+        for name in (
+            "enabled",
+            "private_enabled",
+            "toolbox_enabled",
+            "toolbox_time_enabled",
+        ):
             if not isinstance(getattr(settings, name), bool):
                 raise ValueError(f"{name} must be a boolean")
         for name in (

@@ -25,7 +25,14 @@
   toolbox/time.py implements mingle_get_time with no model-supplied parameters.
   Resolve the session's AstrBot timezone on each call; missing/invalid zones use
   UTC. Include the date, time, numeric UTC offset, timezone and weekday. The tool
-  is usable outside managed Mingle turns and has no separate configuration.
+  is usable outside managed Mingle turns. The final toolbox configuration group
+  exposes toolbox_enabled (master switch) and toolbox_time_enabled, both true
+  by default. All optional tools must have independent switches under this group.
+  Filter disabled tools from a request-local ToolSet before debug capture, never
+  mutate global registrations or enable tools excluded by persona settings. Also
+  check switches at execution time to reject stale calls. The master switch
+  overrides individual settings without changing them. Core Mingle tools and
+  AstrBot built-in tools remain unaffected.
 - Keep business modules in the `src/` package. The root `main.py` remains the
   AstrBot entry point and uses relative imports from `.src`. Keep tests in the
   root `tests/` directory and import business modules through the `src` package.
@@ -71,7 +78,8 @@
 - `src/settings.py` validates immutable runtime settings. `_conf_schema.json` exposes
   these settings in AstrBot's configuration UI. Use one level of object groups
   in this order: general (基础设置), scheduler (调度器), judge (判别器),
-  history (聊天记录), images (图片缓存), debug (调试). CONFIG_GROUPS maps
+  history (聊天记录), images (图片缓存), debug (调试), toolbox (额外工具箱).
+  CONFIG_GROUPS maps
   grouped configuration to flat immutable runtime fields. Flat legacy settings
   are unsupported; do not add migration or fallback logic for this test version.
   Management commands persist general.group_sessions and debug.debug_sessions

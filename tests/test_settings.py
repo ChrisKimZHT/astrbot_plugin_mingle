@@ -21,6 +21,8 @@ from mingle_tests_plugin.src.settings import Settings
         {"judge": {"judge_prompt_append": 123}},
         {"general": []},
         {"scheduler": None},
+        {"toolbox": {"toolbox_enabled": "false"}},
+        {"toolbox": {"toolbox_time_enabled": None}},
     ],
 )
 def test_invalid_settings_fail_at_startup(config):
@@ -53,6 +55,7 @@ def test_grouped_settings_load_custom_values():
             "history": {"recent_messages": 15, "retention_days": 10},
             "images": {"image_cache_mb": 128, "max_image_mb": 5},
             "debug": {"debug_sessions": ["p:FriendMessage:alice"]},
+            "toolbox": {"toolbox_enabled": False, "toolbox_time_enabled": False},
         }
     )
     assert settings == Settings(
@@ -67,4 +70,6 @@ def test_grouped_settings_load_custom_values():
         image_cache_mb=128,
         max_image_mb=5,
         debug_sessions=("p:FriendMessage:alice",),
+        toolbox_enabled=False,
+        toolbox_time_enabled=False,
     )

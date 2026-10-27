@@ -8,6 +8,7 @@ from sys import maxsize
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
+from astrbot.core.agent.tool import ToolSet
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.filter.command import CommandFilter, GreedyStr
@@ -362,6 +363,31 @@ class MinglePlugin(Star):
                 ticket.finished.set()
             self.handlers.discard(task)
 
+    @filter.on_llm_request(priority=-maxsize + 2)
+    async def apply_toolbox_switches(
+        self, event: AstrMessageEvent, request: ProviderRequest
+    ) -> None:
+        """Hide disabled optional tools without altering shared tool registrations.
+
+        Args:
+            event: Event owning this request, including native non-Mingle turns.
+            request: Persona-filtered tool set for the upcoming Agent turn.
+        """
+        if request.func_tool is None:
+            return
+        if (
+            not self.available
+            or not self.settings.toolbox_enabled
+            or not self.settings.toolbox_time_enabled
+        ):
+            request.func_tool = ToolSet(
+                [
+                    tool
+                    for tool in request.func_tool.tools
+                    if tool.name != "mingle_get_time"
+                ]
+            )
+
     @filter.on_llm_request(priority=-maxsize + 1)
     async def clear_history_images(
         self, event: AstrMessageEvent, request: ProviderRequest
@@ -560,6 +586,12 @@ class MinglePlugin(Star):
             JSON with datetime, timezone and weekday; UTC is used if unconfigured
             or if the configured timezone is invalid.
         """
+        if (
+            not self.available
+            or not self.settings.toolbox_enabled
+            or not self.settings.toolbox_time_enabled
+        ):
+            return json.dumps({"error": "The time tool is disabled in Mingle."})
         timezone_name = (
             self.context.get_config(umo=event.unified_msg_origin).get("timezone")
             or "UTC"

@@ -886,3 +886,65 @@ def test_time_tool_registration_has_no_model_supplied_parameters():
     assert not tool.parameters.get("properties")
     assert not tool.parameters.get("required")
     assert tool.handler.__module__ == MinglePlugin.__module__
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "master,individual", [(True, True), (True, False), (False, True), (False, False)]
+)
+async def test_toolbox_switches_filter_requests_and_guard_execution(
+    plugin, master, individual
+):
+    from astrbot.core.agent.tool import FunctionTool, ToolSet
+
+    plugin.settings = replace(
+        plugin.settings, toolbox_enabled=master, toolbox_time_enabled=individual
+    )
+    names = [
+        "mingle_get_time",
+        "mingle_chat_history",
+        "mingle_view_image",
+        "web_search_deepseek",
+    ]
+    shared = ToolSet(
+        [FunctionTool(name=name, parameters={}, description="") for name in names]
+    )
+    request = ProviderRequest(prompt="question", func_tool=shared)
+    event = make_event()
+    assert not event.get_extra("mingle_managed")
+    await plugin.apply_toolbox_switches(event, request)
+    actual = [tool.name for tool in request.func_tool.tools]
+    assert ("mingle_get_time" in actual) is (master and individual)
+    assert set(actual) - {"mingle_get_time"} == set(names) - {"mingle_get_time"}
+    assert [tool.name for tool in shared.tools] == names
+    result = json.loads(await plugin.get_time(event))
+    assert ("error" not in result) is (master and individual)
+    assert plugin.settings.toolbox_time_enabled is individual
+
+
+@pytest.mark.asyncio
+async def test_toolbox_switches_do_not_add_tools_excluded_by_persona(plugin):
+    from astrbot.core.agent.tool import ToolSet
+
+    event = make_event()
+    request = ProviderRequest(prompt="question", func_tool=ToolSet())
+    await plugin.apply_toolbox_switches(event, request)
+    assert request.func_tool.empty()
+    request.func_tool = None
+    await plugin.apply_toolbox_switches(event, request)
+    assert request.func_tool is None
+
+
+def test_toolbox_switches_run_before_request_debug_capture():
+    from astrbot.core.star.star_handler import star_handlers_registry
+
+    handlers = {
+        item.handler_name: item
+        for item in star_handlers_registry.get_handlers_by_module_name(
+            MinglePlugin.__module__
+        )
+    }
+    assert (
+        handlers["apply_toolbox_switches"].extras_configs["priority"]
+        > handlers["dump_agent_request"].extras_configs["priority"]
+    )

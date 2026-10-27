@@ -143,5 +143,24 @@
         "hint": "填写完整 UMO，例如 bot:GroupMessage:群ID 或 bot:FriendMessage:用户ID。空列表关闭调试。记录决策器输入输出及 Agent 初始请求和最终回复，包含提示词和聊天内容；JSON 和表格 HTML 保存到插件数据目录 debug/，日志仅打印 HTML 绝对路径。"
       }
     }
+  },
+  "toolbox": {
+    "type": "object",
+    "description": "额外工具箱",
+    "hint": "独立控制附带的通用工具，不影响聊天记录查询、图片查看或 AstrBot 内置工具。",
+    "items": {
+      "toolbox_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "启用额外工具箱",
+        "hint": "关闭后，所有额外工具均不提供给模型；各工具独立开关的设置会保留。"
+      },
+      "toolbox_time_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "获取当前时间",
+        "hint": "控制 mingle_get_time 工具；跟随当前会话的 AstrBot 时区配置。总开关也必须开启。"
+      }
+    }
   }
 }
