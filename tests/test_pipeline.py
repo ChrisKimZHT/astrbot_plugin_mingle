@@ -720,3 +720,137 @@ async def test_view_image_reports_preparation_failure_without_returning_original
     result = await plugin.view_image(event, 1)
     assert result.isError is True
     assert all(item.type == "text" for item in result.content)
+
+
+@pytest.mark.asyncio
+async def test_history_images_are_removed_before_debug_and_saved_history_keeps_current_turn_images(
+    plugin,
+):
+    import copy
+
+    from astrbot.core.agent.message import (
+        ImageURLPart,
+        Message,
+        bind_checkpoint_messages,
+    )
+    from astrbot.core.db.po import Conversation
+    from astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal import (
+        InternalAgentSubStage,
+    )
+
+    event = make_event()
+    event.set_extra("mingle_managed", True)
+    plugin.debug_dumper.settings = replace(
+        plugin.settings, debug_sessions=(event.unified_msg_origin,)
+    )
+    old_image = "data:image/png;base64,OLD_IMAGE"
+    history = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Original caption"},
+                {"type": "image_url", "image_url": {"url": old_image}},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call1",
+                    "type": "function",
+                    "function": {
+                        "name": "mingle_view_image",
+                        "arguments": '{"record_id":60}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call1", "content": "Viewed record 60"},
+    ]
+    original = copy.deepcopy(history)
+    conversation = Conversation(
+        platform_id="p",
+        user_id="group",
+        cid="conversation",
+        history=json.dumps(history),
+    )
+    current_image = ImageURLPart(
+        image_url=ImageURLPart.ImageURL(url="data:image/png;base64,CURRENT_IMAGE")
+    )
+    request = ProviderRequest(
+        prompt="Follow-up",
+        contexts=history,
+        conversation=conversation,
+        image_urls=["current.png"],
+        extra_user_content_parts=[current_image],
+    )
+    await plugin.clear_history_images(event, request)
+    assert history == original
+    assert conversation.history == json.dumps(original)
+    assert old_image not in json.dumps(request.contexts)
+    assert request.contexts[0]["content"][0]["text"] == "Original caption"
+    assert request.contexts[1:] == original[1:]
+    assert request.image_urls == ["current.png"]
+    assert request.extra_user_content_parts == [current_image]
+    assert json.loads(request.conversation.history) == request.contexts
+    await plugin.dump_agent_request(event, request)
+    dumps = list(plugin.debug_dumper.directory.rglob("*agent_input*.json"))
+    assert len(dumps) == 1
+    assert old_image not in dumps[0].read_text(encoding="utf-8")
+
+    # Exercise the framework saver: a new tool image remains for this turn,
+    # while images cleaned from the previous turn are no longer persisted.
+    runtime = bind_checkpoint_messages(request.contexts)
+    runtime.append(Message(role="user", content=[current_image]))
+    runtime.append(Message(role="assistant", content="Answer"))
+    stage = object.__new__(InternalAgentSubStage)
+    stage.conv_manager = SimpleNamespace(update_conversation=AsyncMock())
+    await stage._save_to_history(
+        event,
+        request,
+        LLMResponse(role="assistant", completion_text="Answer"),
+        runtime,
+        None,
+    )
+    saved = stage.conv_manager.update_conversation.call_args.kwargs["history"]
+    assert old_image not in json.dumps(saved)
+    assert "CURRENT_IMAGE" in json.dumps(saved)
+    next_request = ProviderRequest(prompt="Next turn", contexts=saved)
+    await plugin.clear_history_images(event, next_request)
+    assert "CURRENT_IMAGE" not in json.dumps(next_request.contexts)
+    assert next_request.contexts[-1]["content"] == "Answer"
+
+
+@pytest.mark.asyncio
+async def test_history_image_cleanup_does_not_affect_unmanaged_requests(plugin):
+    event = make_event()
+    contexts = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,KEEP"},
+                }
+            ],
+        }
+    ]
+    request = ProviderRequest(prompt="Native request", contexts=contexts)
+    await plugin.clear_history_images(event, request)
+    assert request.contexts is contexts
+    assert "KEEP" in json.dumps(request.contexts)
+
+
+def test_history_image_cleanup_runs_before_request_debug_capture():
+    from astrbot.core.star.star_handler import star_handlers_registry
+
+    handlers = {
+        item.handler_name: item
+        for item in star_handlers_registry.get_handlers_by_module_name(
+            MinglePlugin.__module__
+        )
+    }
+    assert handlers["clear_history_images"].extras_configs.get(
+        "priority", 0
+    ) > handlers["dump_agent_request"].extras_configs.get("priority", 0)

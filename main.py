@@ -361,6 +361,63 @@ class MinglePlugin(Star):
                 ticket.finished.set()
             self.handlers.discard(task)
 
+    @filter.on_llm_request(priority=-maxsize + 1)
+    async def clear_history_images(
+        self, event: AstrMessageEvent, request: ProviderRequest
+    ) -> None:
+        """Remove previous-turn images before a managed Agent turn starts.
+
+        Args:
+            event: Event identifying a Mingle-managed turn.
+            request: Loaded historical contexts and current-turn input.
+        """
+        if not self.available or not event.get_extra("mingle_managed", False):
+            return
+        histories = [request.contexts]
+        if request.conversation is not None:
+            histories.append(json.loads(request.conversation.history or "[]"))
+        cleaned_histories = []
+        removed_counts = []
+        for messages in histories:
+            cleaned = []
+            removed = 0
+            for message in messages:
+                content = message.get("content")
+                if not isinstance(content, list):
+                    cleaned.append(message)
+                    continue
+                parts = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        parts.append(
+                            {
+                                "type": "text",
+                                "text": "[Previous-turn image omitted. Use "
+                                "mingle_view_image to reopen it if cached.]",
+                            }
+                        )
+                        removed += 1
+                    else:
+                        parts.append(part)
+                cleaned.append({**message, "content": parts})
+            cleaned_histories.append(cleaned)
+            removed_counts.append(removed)
+        request.contexts = cleaned_histories[0]
+        if request.conversation is not None and removed_counts[1]:
+            # This is an in-memory snapshot. The framework persists the cleaned
+            # runtime history after the turn, including any newly viewed images.
+            request.conversation = replace(
+                request.conversation,
+                history=json.dumps(cleaned_histories[1], ensure_ascii=False),
+            )
+        if any(removed_counts):
+            self.logger.debug(
+                "Removed previous-turn images for session %s: contexts=%d, saved=%d",
+                event.unified_msg_origin,
+                removed_counts[0],
+                removed_counts[1] if len(removed_counts) > 1 else 0,
+            )
+
     @filter.on_llm_request(priority=-maxsize)
     async def dump_agent_request(
         self, event: AstrMessageEvent, request: ProviderRequest

@@ -185,6 +185,15 @@
   cached bytes, report the actual output MIME type, and remove compressor temp
   files after reading. Compression does not enforce a hard byte-size limit.
   Preparation errors return a tool error instead of sending an oversized original.
+- On each Mingle-managed turn, remove historical image_url parts in
+  `on_llm_request` before the debug capture and Agent reset. Replace images with
+  text placeholders, preserving existing text, tool calls/results and checkpoints.
+  Clean both request contexts and the conversation's in-memory history snapshot;
+  do not overwrite the database before the turn. AstrBot saves the cleaned runtime
+  history through its normal completion/interruption flow. Keep current request
+  attachments and images returned by tools during this turn. Those images remain
+  usable across steps until the next turn. Do not apply this policy to unmanaged
+  native/debug-only requests or delete original cache files.
 - Retention runs at startup, every five minutes, and after image-bearing writes.
   Unreferenced files left by interrupted writes are cleaned up as well.
 - No automatic image summaries in v0.1.0. Audio, video and other files have type
