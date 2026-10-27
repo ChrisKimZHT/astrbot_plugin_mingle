@@ -15,6 +15,8 @@ from mingle_tests_plugin.settings import Settings
         {"group_sessions": "group"},
         {"group_sessions": [1]},
         {"judge_provider_id": 1},
+        {"judge_prompt": None},
+        {"judge_prompt_append": 123},
     ],
 )
 def test_invalid_settings_fail_at_startup(config):

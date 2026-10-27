@@ -29,6 +29,11 @@
   persona on every judgment so edits, resets, and switches take effect; do not
   maintain a stale persona cache. Reusing a judgment provider does not itself
   apply the Agent persona, so this injection is explicit.
+- Judgment instructions are configurable through `judge_prompt` (the original
+  default rules) and `judge_prompt_append` (empty by default). Concatenate them
+  verbatim, without trimming, interpolation, or an implicit separator. Append
+  the persona block afterwards; chat history stays in the separate user input.
+  Keep the schema default synchronized with `DEFAULT_JUDGE_PROMPT` in settings.
 - `history.py` owns an independent SQLite database and image cache under
   `StarTools.get_data_dir("astrbot_plugin_mingle")`.
 - `settings.py` validates immutable runtime settings. `_conf_schema.json` exposes

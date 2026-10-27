@@ -125,3 +125,44 @@ async def test_persona_edits_and_disabled_persona_are_not_cached(context, event)
     assert await judge.should_reply(event, [])
     assert "```quote" not in context.llm_generate.call_args.kwargs["system_prompt"]
     assert context.llm_generate.call_args.kwargs["chat_provider_id"] == "small"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "base, appended",
+    [("Custom rules.\n", "Additional rules."), ("", "Append only"), ("", "")],
+)
+async def test_configured_instructions_are_concatenated_verbatim(
+    context, event, base, appended
+):
+    context.persona_manager.resolve_selected_persona.return_value = (
+        "[%None]",
+        None,
+        None,
+        False,
+    )
+    judge = ReplyJudge(
+        context,
+        Settings(judge_prompt=base, judge_prompt_append=appended),
+        logging.getLogger(),
+    )
+    assert await judge.should_reply(event, [{"text": "A chat message"}])
+    request = context.llm_generate.call_args.kwargs
+    assert request["system_prompt"] == base + appended
+    assert "A chat message" in request["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_persona_is_appended_after_both_configured_instruction_parts(
+    context, event
+):
+    settings = Settings(
+        judge_prompt="Base rules.\n", judge_prompt_append="Extra rules."
+    )
+    judge = ReplyJudge(context, settings, logging.getLogger())
+    assert await judge.should_reply(event, [])
+    system = context.llm_generate.call_args.kwargs["system_prompt"]
+    prefix = settings.judge_prompt + settings.judge_prompt_append
+    assert system.startswith(prefix)
+    assert system.index("```quote") > len(prefix)
+    assert "You enjoy discussing astronomy." in system
