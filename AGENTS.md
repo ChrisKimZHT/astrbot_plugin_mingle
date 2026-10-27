@@ -44,6 +44,9 @@
   verbatim, without trimming, interpolation, or an implicit separator. Append
   the persona block afterwards; chat history stays in the separate user input.
   Keep the schema default synchronized with `DEFAULT_JUDGE_PROMPT` in settings.
+- The default judgment instructions reject clearly unfinished user input,
+  including incomplete sentences and messages being sent in multiple parts,
+  with `should_reply=false` so subsequent content can arrive first.
 - `src/history.py` owns an independent SQLite database and image cache under
   `StarTools.get_data_dir("astrbot_plugin_mingle")`.
 - `src/settings.py` validates immutable runtime settings. `_conf_schema.json` exposes

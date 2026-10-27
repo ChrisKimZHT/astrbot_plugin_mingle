@@ -6,7 +6,10 @@ DEFAULT_JUDGE_PROMPT = (
     "Reply only when there is a useful contribution, a relevant "
     "question, or a continuation addressed to the bot. Avoid "
     "interrupting unrelated conversations or replying to every "
-    'message. Return only JSON: {"should_reply": true/false, '
+    "message. If the latest user message is clearly unfinished, such as an "
+    "incomplete sentence or a thought being sent in multiple parts, return "
+    "should_reply=false and wait for the remaining messages. "
+    'Return only JSON: {"should_reply": true/false, '
     '"reason": "brief explanation"}.'
 )
 
