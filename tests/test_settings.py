@@ -14,6 +14,8 @@ from mingle_tests_plugin.src.settings import Settings
         {"enabled": "false"},
         {"group_sessions": "group"},
         {"group_sessions": [1]},
+        {"debug_sessions": "group"},
+        {"debug_sessions": [1]},
         {"judge_provider_id": 1},
         {"judge_prompt": None},
         {"judge_prompt_append": 123},

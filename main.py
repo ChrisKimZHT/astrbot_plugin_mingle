@@ -16,6 +16,7 @@ from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 from mcp.types import CallToolResult, ImageContent, TextContent
 
+from .src.debug import DebugDumper
 from .src.decision import ReplyJudge
 from .src.history import ChatHistory
 from .src.scheduler import ChatScheduler
@@ -28,13 +29,13 @@ class MinglePlugin(Star):
         self.config = config
         self.config_lock = asyncio.Lock()
         self.settings = Settings.from_config(config)
-        self.history = ChatHistory(
-            StarTools.get_data_dir("astrbot_plugin_mingle"), self.settings, self.logger
-        )
+        directory = StarTools.get_data_dir("astrbot_plugin_mingle")
+        self.debug_dumper = DebugDumper(directory / "debug", self.settings, self.logger)
+        self.history = ChatHistory(directory, self.settings, self.logger)
         self.scheduler = ChatScheduler(
             self.settings,
             self.history,
-            ReplyJudge(context, self.settings, self.logger),
+            ReplyJudge(context, self.settings, self.logger, self.debug_dumper),
             self.logger,
         )
         self.cleanup_task: asyncio.Task | None = None
@@ -115,6 +116,7 @@ class MinglePlugin(Star):
                 self.scheduler.settings = self.settings
                 self.scheduler.judge.settings = self.settings
                 self.history.settings = self.settings
+                self.debug_dumper.settings = self.settings
                 self.logger.info(
                     "Mingle group allowlist updated for %s: %s", group_session, state
                 )
@@ -125,6 +127,60 @@ class MinglePlugin(Star):
                 )
                 if state == "on" and not self.settings.enabled:
                     message += "插件总开关当前关闭，需在配置中启用。"
+        yield event.plain_result(message)
+
+    @mingle.command("debug")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def manage_debug(self, event: AstrMessageEvent, state: str):
+        """Enable or disable debug dumps in the current group or private chat.
+
+        Args:
+            event: Administrator command defining the current chat.
+            state: Either on or off.
+
+        Yields:
+            The persisted debug setting result or usage guidance.
+        """
+        if state not in {"on", "off"}:
+            yield event.plain_result("用法：/mingle debug on 或 /mingle debug off")
+            return
+        session = event.unified_msg_origin
+        if not event.is_private_chat() and event.get_group_id():
+            session = f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{event.get_group_id()}"
+        async with self.config_lock:
+            previous = list(self.config.get("debug_sessions", []))
+            sessions = [item.strip() for item in previous if item.strip()]
+            if state == "on":
+                if session not in sessions:
+                    sessions.append(session)
+            else:
+                sessions = [
+                    item
+                    for item in sessions
+                    if item not in {session, event.unified_msg_origin}
+                ]
+            try:
+                await self.config.save_config_async({"debug_sessions": sessions})
+            except Exception:
+                self.config["debug_sessions"] = previous
+                self.logger.exception(
+                    "Failed to update Mingle debug sessions for %s", session
+                )
+                message = "保存配置失败，当前会话的 debug 设置未更改。"
+            else:
+                self.settings = replace(self.settings, debug_sessions=tuple(sessions))
+                self.scheduler.settings = self.settings
+                self.scheduler.judge.settings = self.settings
+                self.history.settings = self.settings
+                self.debug_dumper.settings = self.settings
+                self.logger.info(
+                    "Mingle debug setting updated for %s: %s", session, state
+                )
+                message = (
+                    "已开启当前会话的 debug，dump 文件路径会输出到日志。"
+                    if state == "on"
+                    else "已关闭当前会话的 debug，已有 dump 文件保留。"
+                )
         yield event.plain_result(message)
 
     @filter.event_message_type(
@@ -255,6 +311,57 @@ class MinglePlugin(Star):
             if ticket is not None:
                 ticket.finished.set()
             self.handlers.discard(task)
+
+    @filter.on_llm_request(priority=-maxsize)
+    async def dump_agent_request(
+        self, event: AstrMessageEvent, request: ProviderRequest
+    ) -> None:
+        """Capture the initial Agent request after ordinary request hooks.
+
+        Args:
+            event: Event defining the configured debug session.
+            request: Initial plugin-layer request, before per-step compression
+                and provider-specific HTTP serialization.
+        """
+        if not self.available or not self.debug_dumper.is_enabled(event):
+            return
+        request_id = uuid.uuid4().hex
+        event.set_extra("mingle_debug_agent_request_id", request_id)
+        await self.debug_dumper.dump(
+            event,
+            "agent",
+            "input",
+            {
+                "request": request,
+                "selected_provider": event.get_extra("selected_provider"),
+                "selected_model": event.get_extra("selected_model"),
+            },
+            request_id,
+        )
+
+    @filter.on_llm_response(priority=-maxsize)
+    async def dump_agent_response(
+        self, event: AstrMessageEvent, response: LLMResponse
+    ) -> None:
+        """Capture the final Agent response for a previously observed request.
+
+        Args:
+            event: Event carrying the request correlation identifier.
+            response: Final response delivered by AstrBot, including error roles.
+        """
+        request_id = event.get_extra("mingle_debug_agent_request_id")
+        if not self.available or not request_id:
+            return
+        await self.debug_dumper.dump(
+            event,
+            "agent",
+            "output",
+            {
+                "completion_text": response.completion_text,
+                "response": response,
+            },
+            request_id,
+        )
 
     @filter.on_llm_response()
     async def record_response(

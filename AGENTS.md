@@ -41,6 +41,36 @@
   `StarTools.get_data_dir("astrbot_plugin_mingle")`.
 - `src/settings.py` validates immutable runtime settings. `_conf_schema.json` exposes
   these settings in AstrBot's configuration UI.
+- Keep debugging implementation in `src/debug.py`, including future debug
+  features. `debug_sessions` is an independent list of full UMOs, empty by
+  default. Platform-scoped whole-group UMOs also cover isolated member events.
+  `/mingle debug on|off` is administrator-only and persists the current group
+  or private chat setting without enabling normal Mingle chat handling.
+- Debug capture is explicitly at plugin level: decision-model input/output,
+  plus Agent initial request and final response through standard hooks. Do not
+  wrap Providers or claim to capture every Agent step or final HTTP payload.
+  Request hooks run at low priority to observe ordinary plugin modifications,
+  but later hooks can still change the request. Matching native Agent requests
+  are included even outside Mingle-managed groups when these hooks execute.
+- Dumps are JSON with same-stem HTML companions under the plugin data directory
+  `debug/<UTC-date>/<scope-hash>/`. Each input/output pair has a request ID. Use
+  unique filenames, atomic writes, and off-thread file IO. Log only the absolute
+  HTML path at INFO after both files are written successfully.
+  Render every serialized JSON field as HTML tables, with minimal inline CSS
+  for collapsed borders, 100% width, automatic table layout and long-text wrapping.
+  Keep row-label columns compact with an eight-character minimum so nested
+  tables do not repeatedly split available width into equal halves.
+  No JavaScript, external dependencies, or omitted values. Escape all content and
+  link the original JSON. For JSON-encoded prompt strings, display a parsed
+  table plus the original string in native details/pre elements; never change
+  the saved JSON or the actual model request to improve presentation.
+  Write failures must not break inference. Do not dump provider configuration
+  or authentication headers; prompts, history and returned model data are saved.
+  Switching debug off stops new dumps and does not delete existing files.
+  Existing debug files are not subject to chat/image retention cleanup.
+- Decision input dumps store `payload.prompt` as the exact JSON-encoded string
+  passed to `context.llm_generate`. Do not replace it with a parsed array in the
+  dump; the snapshot should preserve the plugin-layer call arguments.
 - Group sessions must be explicitly listed. Prefer full UMO identifiers; bare
   group IDs are supported. Empty group configuration enables no group chats.
 - `/mingle group on|off` is restricted to AstrBot administrators, on both the

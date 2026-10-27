@@ -11,6 +11,12 @@
     "description": "生效群聊",
     "hint": "填写完整 UMO（推荐）或群 ID；空列表不接管任何群聊。"
   },
+  "debug_sessions": {
+    "type": "list",
+    "default": [],
+    "description": "Debug 群聊 / 私聊会话",
+    "hint": "填写完整 UMO，例如 bot:GroupMessage:群ID 或 bot:FriendMessage:用户ID。空列表关闭调试。记录决策器输入输出及 Agent 初始请求和最终回复，包含提示词和聊天内容；JSON 和表格 HTML 保存到插件数据目录 debug/，日志仅打印 HTML 绝对路径。"
+  },
   "private_enabled": {
     "type": "bool",
     "default": true,

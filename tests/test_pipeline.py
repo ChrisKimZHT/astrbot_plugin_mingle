@@ -20,6 +20,7 @@ from astrbot.core.platform.platform_metadata import PlatformMetadata
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.filter.command import CommandFilter
 from mingle_tests_plugin.main import MinglePlugin
+from mingle_tests_plugin.src.debug import DebugDumper
 from mingle_tests_plugin.src.decision import ReplyJudge
 from mingle_tests_plugin.src.history import ChatHistory
 from mingle_tests_plugin.src.scheduler import ChatScheduler
@@ -58,6 +59,9 @@ async def plugin(tmp_path, monkeypatch):
         str(tmp_path / "config.json"), default_config={"group_sessions": ["group"]}
     )
     instance.config_lock = asyncio.Lock()
+    instance.debug_dumper = DebugDumper(
+        tmp_path / "debug", instance.settings, instance.logger
+    )
     instance.context = SimpleNamespace(
         get_config=lambda **kwargs: {"provider_settings": {"enable": True}},
         conversation_manager=SimpleNamespace(
@@ -81,7 +85,9 @@ async def plugin(tmp_path, monkeypatch):
     instance.scheduler = ChatScheduler(
         instance.settings,
         instance.history,
-        ReplyJudge(instance.context, instance.settings, instance.logger),
+        ReplyJudge(
+            instance.context, instance.settings, instance.logger, instance.debug_dumper
+        ),
         instance.logger,
     )
     instance.available = True
@@ -291,7 +297,7 @@ def test_group_management_permission_is_registered_on_group_and_subcommand():
     handlers = star_handlers_registry.get_handlers_by_module_name(
         MinglePlugin.__module__
     )
-    for name in ("mingle", "manage_group"):
+    for name in ("mingle", "manage_group", "manage_debug"):
         handler = next(item for item in handlers if item.handler_name == name)
         permission = next(
             item
@@ -319,3 +325,107 @@ async def test_group_enable_applies_to_isolated_members_and_platform_scope(plugi
     other.platform_meta.id = "other"
     assert [value async for value in plugin.on_message(other)] == []
     assert not other.get_extra("mingle_managed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private", [False, True])
+async def test_debug_command_persists_current_chat_and_updates_runtime(plugin, private):
+    event = make_event(private=private)
+    original_groups = plugin.settings.group_sessions
+    results = [value async for value in plugin.manage_debug(event, "on")]
+    assert "已开启" in results[0].get_plain_text()
+    assert plugin.settings.debug_sessions == (event.unified_msg_origin,)
+    assert plugin.debug_dumper.is_enabled(event)
+    assert plugin.debug_dumper.settings is plugin.settings
+    assert plugin.scheduler.judge.settings is plugin.settings
+    persisted = json.loads(
+        Path(plugin.config.config_path).read_text(encoding="utf-8-sig")
+    )
+    assert persisted["debug_sessions"] == [event.unified_msg_origin]
+    assert plugin.settings.group_sessions == original_groups
+    [value async for value in plugin.manage_debug(event, "on")]
+    assert plugin.config["debug_sessions"] == [event.unified_msg_origin]
+    results = [value async for value in plugin.manage_debug(event, "off")]
+    assert "已关闭" in results[0].get_plain_text()
+    assert not plugin.debug_dumper.is_enabled(event)
+    persisted = json.loads(
+        Path(plugin.config.config_path).read_text(encoding="utf-8-sig")
+    )
+    assert persisted["debug_sessions"] == []
+
+
+@pytest.mark.asyncio
+async def test_debug_command_rejects_bad_arguments_and_recovers_from_save_failure(
+    plugin, monkeypatch
+):
+    original = plugin.settings
+    results = [value async for value in plugin.manage_debug(make_event(), "maybe")]
+    assert "用法" in results[0].get_plain_text()
+    assert plugin.settings is original
+    monkeypatch.setattr(
+        plugin.config, "save_config_async", AsyncMock(side_effect=OSError("disk full"))
+    )
+    results = [value async for value in plugin.manage_debug(make_event(), "on")]
+    assert "保存配置失败" in results[0].get_plain_text()
+    assert plugin.settings is original
+    assert plugin.debug_dumper.settings is original
+    assert plugin.config["debug_sessions"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["assistant", "err"])
+async def test_agent_debug_hooks_capture_request_and_final_response_outside_managed_flow(
+    plugin, role
+):
+    event = make_event()
+    [value async for value in plugin.manage_debug(event, "on")]
+    assert not event.get_extra("mingle_managed")
+    request = ProviderRequest(
+        prompt="Original question",
+        system_prompt="Configured persona",
+        contexts=[{"role": "user", "content": "History"}],
+    )
+    await plugin.dump_agent_request(event, request)
+    request.prompt = "Changed after the capture"
+    response = LLMResponse(role=role, completion_text="Final model result")
+    await plugin.dump_agent_response(event, response)
+    documents = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in plugin.debug_dumper.directory.rglob("*.json")
+    ]
+    assert len(documents) == 2
+    assert len({item["request_id"] for item in documents}) == 1
+    assert {item["kind"] for item in documents} == {"agent"}
+    initial = next(item for item in documents if item["phase"] == "input")["payload"][
+        "request"
+    ]
+    assert initial["prompt"] == "Original question"
+    assert initial["system_prompt"] == "Configured persona"
+    assert initial["contexts"] == [{"role": "user", "content": "History"}]
+    final = next(item for item in documents if item["phase"] == "output")["payload"]
+    assert final["completion_text"] == "Final model result"
+    assert final["response"]["role"] == role
+
+
+@pytest.mark.asyncio
+async def test_debug_off_stops_new_dumps_without_removing_existing_files(plugin):
+    event = make_event(private=True)
+    [value async for value in plugin.manage_debug(event, "on")]
+    await plugin.dump_agent_request(event, ProviderRequest(prompt="question"))
+    [value async for value in plugin.manage_debug(event, "off")]
+    await plugin.dump_agent_response(
+        event, LLMResponse(role="assistant", completion_text="answer")
+    )
+    documents = list(plugin.debug_dumper.directory.rglob("*.json"))
+    assert len(documents) == 1
+    assert json.loads(documents[0].read_text(encoding="utf-8"))["phase"] == "input"
+
+
+@pytest.mark.asyncio
+async def test_agent_debug_hooks_create_nothing_when_disabled(plugin):
+    event = make_event()
+    await plugin.dump_agent_request(event, ProviderRequest(prompt="question"))
+    await plugin.dump_agent_response(
+        event, LLMResponse(role="assistant", completion_text="answer")
+    )
+    assert not plugin.debug_dumper.directory.exists()

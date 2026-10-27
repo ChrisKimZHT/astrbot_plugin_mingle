@@ -15,6 +15,7 @@ DEFAULT_JUDGE_PROMPT = (
 class Settings:
     enabled: bool = True
     group_sessions: tuple[str, ...] = ()
+    debug_sessions: tuple[str, ...] = ()
     private_enabled: bool = True
     judge_provider_id: str = ""
     judge_prompt: str = DEFAULT_JUDGE_PROMPT
@@ -49,14 +50,13 @@ class Settings:
             for field in fields(cls)
             if field.name in config
         }
-        sessions = values.get("group_sessions", ())
-        if not isinstance(sessions, (list, tuple)) or not all(
-            isinstance(item, str) for item in sessions
-        ):
-            raise ValueError("group_sessions must be a list of session identifiers")
-        values["group_sessions"] = tuple(
-            item.strip() for item in sessions if item.strip()
-        )
+        for name in ("group_sessions", "debug_sessions"):
+            sessions = values.get(name, ())
+            if not isinstance(sessions, (list, tuple)) or not all(
+                isinstance(item, str) for item in sessions
+            ):
+                raise ValueError(f"{name} must be a list of session identifiers")
+            values[name] = tuple(item.strip() for item in sessions if item.strip())
         settings = cls(**values)
         for name in ("enabled", "private_enabled"):
             if not isinstance(getattr(settings, name), bool):
