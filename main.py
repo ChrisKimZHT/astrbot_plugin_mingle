@@ -11,7 +11,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
-from astrbot.core.star.filter.command import CommandFilter
+from astrbot.core.star.filter.command import CommandFilter, GreedyStr
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 from mcp.types import CallToolResult, ImageContent, TextContent
@@ -66,13 +66,32 @@ class MinglePlugin(Star):
             except Exception:
                 self.logger.exception("Mingle retention cleanup failed")
 
-    @filter.command_group("mingle")
+    @filter.command("mingle")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    def mingle(self):
-        """Manage Mingle as an AstrBot administrator."""
+    async def mingle(self, event: AstrMessageEvent, args: GreedyStr):
+        """Dispatch management commands or show the plugin-owned help tree.
 
-    @mingle.command("group")
-    @filter.permission_type(filter.PermissionType.ADMIN)
+        Args:
+            event: Administrator command defining the current chat.
+            args: All text following the mingle command, including empty input.
+
+        Yields:
+            Management results or plain-text command help.
+        """
+        parts = args.split()
+        if len(parts) != 2 or parts[0] not in {"group", "debug"}:
+            yield event.plain_result(
+                "mingle\n"
+                "├── group on|off\n"
+                "│\t开启或关闭当前群聊\n"
+                "└── debug on|off\n"
+                "\t开启或关闭当前会话调试"
+            ).use_markdown(False)
+            return
+        handler = self.manage_group if parts[0] == "group" else self.manage_debug
+        async for result in handler(event, parts[1]):
+            yield result
+
     async def manage_group(self, event: AstrMessageEvent, state: str):
         """Enable or disable Mingle in the current group.
 
@@ -145,8 +164,6 @@ class MinglePlugin(Star):
                     message += "插件总开关当前关闭，需在配置中启用。"
         yield event.plain_result(message)
 
-    @mingle.command("debug")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def manage_debug(self, event: AstrMessageEvent, state: str):
         """Enable or disable debug dumps in the current group or private chat.
 

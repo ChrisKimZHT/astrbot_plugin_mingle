@@ -387,14 +387,17 @@ async def test_group_management_save_failure_leaves_runtime_unchanged(
     assert plugin.config["general"]["group_sessions"] == ["group"]
 
 
-def test_group_management_permission_is_registered_on_group_and_subcommand():
+def test_management_dispatcher_is_the_only_registered_management_handler():
     from astrbot.core.star.filter.permission import PermissionType, PermissionTypeFilter
     from astrbot.core.star.star_handler import star_handlers_registry
 
     handlers = star_handlers_registry.get_handlers_by_module_name(
         MinglePlugin.__module__
     )
-    for name in ("mingle", "manage_group", "manage_debug"):
+    assert not any(
+        item.handler_name in {"manage_group", "manage_debug"} for item in handlers
+    )
+    for name in ("mingle",):
         handler = next(item for item in handlers if item.handler_name == name)
         permission = next(
             item
@@ -569,3 +572,79 @@ async def test_history_tool_returns_stored_records(plugin):
     first_id = await plugin.history.record(event, event.get_messages())
     result = json.loads(await plugin.chat_history(event))
     assert result["messages"][0]["id"] == first_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", ["", "group", "debug", "unknown", "group on extra"])
+async def test_management_help_uses_tree_format_without_changing_settings(plugin, args):
+    from astrbot.core.star.star_handler import star_handlers_registry
+
+    handler = next(
+        item
+        for item in star_handlers_registry.get_handlers_by_module_name(
+            MinglePlugin.__module__
+        )
+        if item.handler_name == "mingle"
+    )
+    command = next(
+        item for item in handler.event_filters if isinstance(item, CommandFilter)
+    )
+    event = make_event()
+    event.role = "admin"
+    event.is_at_or_wake_command = True
+    event.message_str = f"mingle {args}".strip()
+    original = plugin.settings
+    assert command.filter(event, {})
+    results = [
+        value
+        async for value in plugin.mingle(event, **event.get_extra("parsed_params"))
+    ]
+    assert len(results) == 1
+    assert results[0].get_plain_text() == (
+        "mingle\n"
+        "├── group on|off\n"
+        "│\t开启或关闭当前群聊\n"
+        "└── debug on|off\n"
+        "\t开启或关闭当前会话调试"
+    )
+    assert results[0].use_markdown_ is False
+    assert plugin.settings is original
+    event.set_extra("activated_handlers", [handler])
+    assert [value async for value in plugin.on_message(event)] == []
+    assert not event.get_extra("mingle_managed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subcommand", ["group", "debug"])
+async def test_management_dispatcher_routes_complete_command_arguments(
+    plugin, subcommand
+):
+    from astrbot.core.star.star_handler import star_handlers_registry
+
+    handler = next(
+        item
+        for item in star_handlers_registry.get_handlers_by_module_name(
+            MinglePlugin.__module__
+        )
+        if item.handler_name == "mingle"
+    )
+    command = next(
+        item for item in handler.event_filters if isinstance(item, CommandFilter)
+    )
+    event = make_event()
+    event.role = "admin"
+    event.is_at_or_wake_command = True
+    for state in ("on", "off"):
+        event.message_str = f"mingle {subcommand} {state}"
+        assert command.filter(event, {})
+        results = [
+            value
+            async for value in plugin.mingle(event, **event.get_extra("parsed_params"))
+        ]
+        assert len(results) == 1
+        sessions = (
+            plugin.settings.group_sessions
+            if subcommand == "group"
+            else plugin.settings.debug_sessions
+        )
+        assert (event.unified_msg_origin in sessions) is (state == "on")

@@ -97,8 +97,14 @@
   dump; the snapshot should preserve the plugin-layer call arguments.
 - Group sessions must be explicitly listed. Prefer full UMO identifiers; bare
   group IDs are supported. Empty group configuration enables no group chats.
-- `/mingle group on|off` is restricted to AstrBot administrators, on both the
-  group registration and its concrete subcommand. Reject private-chat use.
+- Register one administrator-only `/mingle` command with a GreedyStr argument.
+  Dispatch group/debug actions inside it; their implementation methods are not
+  independently registered handlers. Maintain the plain-text help tree manually,
+  using continuation bars with tabs and a final branch without a trailing bar.
+  Empty, incomplete and unknown commands show this help without changing settings.
+  Do not patch the framework command-group help renderer.
+- `/mingle group on|off` is restricted to AstrBot administrators through the
+  dispatcher. Reject private-chat use.
   Enable stores a platform-scoped group UMO; match that group UMO even when
   AstrBot isolates member conversations. Disable removes the group UMO, current
   event UMO, and legacy bare group ID, preserving unrelated allowlist entries.
