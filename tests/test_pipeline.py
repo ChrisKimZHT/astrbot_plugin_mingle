@@ -57,8 +57,13 @@ async def plugin(tmp_path, monkeypatch):
         conversation_manager=SimpleNamespace(
             get_curr_conversation_id=AsyncMock(return_value="conversation"),
             get_conversation=AsyncMock(
-                return_value=SimpleNamespace(cid="conversation", history="[]")
+                return_value=SimpleNamespace(
+                    cid="conversation", history="[]", persona_id=None
+                )
             ),
+        ),
+        persona_manager=SimpleNamespace(
+            resolve_selected_persona=AsyncMock(return_value=(None, None, None, False))
         ),
         get_current_chat_provider_id=AsyncMock(return_value="default"),
         llm_generate=AsyncMock(

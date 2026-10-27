@@ -7,6 +7,37 @@ from mingle_tests_plugin.decision import ReplyJudge
 from mingle_tests_plugin.settings import Settings
 
 
+@pytest.fixture
+def context():
+    return SimpleNamespace(
+        get_current_chat_provider_id=AsyncMock(return_value="default"),
+        llm_generate=AsyncMock(
+            return_value=SimpleNamespace(completion_text='{"should_reply": true}')
+        ),
+        conversation_manager=SimpleNamespace(
+            get_curr_conversation_id=AsyncMock(return_value="conversation"),
+            get_conversation=AsyncMock(
+                return_value=SimpleNamespace(persona_id="persona")
+            ),
+        ),
+        persona_manager=SimpleNamespace(
+            resolve_selected_persona=AsyncMock(
+                return_value=(
+                    "persona",
+                    {"prompt": "You enjoy discussing astronomy."},
+                    None,
+                    False,
+                )
+            )
+        ),
+    )
+
+
+@pytest.fixture
+def event():
+    return SimpleNamespace(unified_msg_origin="group", get_platform_name=lambda: "test")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "text, expected",
@@ -19,26 +50,78 @@ from mingle_tests_plugin.settings import Settings
         ("[]", False),
     ],
 )
-async def test_strict_judgment_and_default_provider(text, expected):
-    context = SimpleNamespace(
-        get_current_chat_provider_id=AsyncMock(return_value="default"),
-        llm_generate=AsyncMock(return_value=SimpleNamespace(completion_text=text)),
-    )
+async def test_strict_judgment_and_default_provider(text, expected, context, event):
+    context.llm_generate.return_value = SimpleNamespace(completion_text=text)
     judge = ReplyJudge(context, Settings(), logging.getLogger())
-    assert (
-        await judge.should_reply(SimpleNamespace(unified_msg_origin="group"), [])
-        is expected
-    )
+    assert await judge.should_reply(event, []) is expected
     assert context.llm_generate.call_args.kwargs["chat_provider_id"] == "default"
 
 
 @pytest.mark.asyncio
-async def test_selected_provider_and_failure_are_isolated():
-    context = SimpleNamespace(
-        llm_generate=AsyncMock(side_effect=RuntimeError("unavailable"))
-    )
+async def test_selected_provider_and_failure_are_isolated(context, event):
+    context.llm_generate.side_effect = RuntimeError("unavailable")
     judge = ReplyJudge(
         context, Settings(judge_provider_id="small"), logging.getLogger()
     )
-    assert not await judge.should_reply(SimpleNamespace(unified_msg_origin="group"), [])
+    assert not await judge.should_reply(event, [])
+    assert context.llm_generate.call_args.kwargs["chat_provider_id"] == "small"
+
+
+@pytest.mark.asyncio
+async def test_persona_uses_framework_selection_and_stable_prefix(context, event):
+    judge = ReplyJudge(context, Settings(), logging.getLogger())
+    first_messages = [{"id": 1, "text": "A first question"}]
+    second_messages = [{"id": 2, "text": "A follow-up"}]
+    assert await judge.should_reply(event, first_messages)
+    assert await judge.should_reply(event, second_messages)
+    calls = context.llm_generate.call_args_list
+    assert calls[0].kwargs["system_prompt"] == calls[1].kwargs["system_prompt"]
+    assert (
+        "```quote\nYou enjoy discussing astronomy.\n```"
+        in calls[0].kwargs["system_prompt"]
+    )
+    assert "A first question" not in calls[0].kwargs["system_prompt"]
+    assert calls[0].kwargs["prompt"] != calls[1].kwargs["prompt"]
+    context.persona_manager.resolve_selected_persona.assert_awaited_with(
+        umo="group", conversation_persona_id="persona", platform_name="test"
+    )
+
+
+@pytest.mark.asyncio
+async def test_new_session_resolves_default_persona_without_creating_conversation(
+    context, event
+):
+    context.conversation_manager.get_curr_conversation_id.return_value = None
+    judge = ReplyJudge(context, Settings(), logging.getLogger())
+    assert await judge.should_reply(event, [])
+    context.conversation_manager.get_conversation.assert_not_awaited()
+    context.persona_manager.resolve_selected_persona.assert_awaited_once_with(
+        umo="group", conversation_persona_id=None, platform_name="test"
+    )
+
+
+@pytest.mark.asyncio
+async def test_persona_edits_and_disabled_persona_are_not_cached(context, event):
+    judge = ReplyJudge(
+        context, Settings(judge_provider_id="small"), logging.getLogger()
+    )
+    assert await judge.should_reply(event, [])
+    context.persona_manager.resolve_selected_persona.return_value = (
+        "changed",
+        {"prompt": "A different persona"},
+        "changed",
+        False,
+    )
+    assert await judge.should_reply(event, [])
+    updated = context.llm_generate.call_args.kwargs["system_prompt"]
+    assert "A different persona" in updated
+    assert "astronomy" not in updated
+    context.persona_manager.resolve_selected_persona.return_value = (
+        "[%None]",
+        None,
+        None,
+        False,
+    )
+    assert await judge.should_reply(event, [])
+    assert "```quote" not in context.llm_generate.call_args.kwargs["system_prompt"]
     assert context.llm_generate.call_args.kwargs["chat_provider_id"] == "small"

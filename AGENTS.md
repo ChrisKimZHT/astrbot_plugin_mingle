@@ -21,6 +21,14 @@
 - `decision.py` calls a judgment provider without tools. An empty provider ID
   follows AstrBot's current session provider; another configured provider may be
   selected in the plugin settings. Invalid decisions and failures mean silence.
+- Resolve the judgment persona with AstrBot's `resolve_selected_persona`, using
+  the current conversation persona and session override rules. Put its prompt
+  inside a `quote` fenced block in the stable system prompt, after fixed judgment
+  instructions. Changing chat records belong only in the user message. Never
+  add message IDs, timestamps, or session IDs to the system prefix. Resolve the
+  persona on every judgment so edits, resets, and switches take effect; do not
+  maintain a stale persona cache. Reusing a judgment provider does not itself
+  apply the Agent persona, so this injection is explicit.
 - `history.py` owns an independent SQLite database and image cache under
   `StarTools.get_data_dir("astrbot_plugin_mingle")`.
 - `settings.py` validates immutable runtime settings. `_conf_schema.json` exposes
