@@ -26,7 +26,7 @@ class Settings:
     judge_timeout: float = 20.0
     debounce_seconds: float = 2.0
     max_wait_seconds: float = 8.0
-    cooldown_seconds: float = 60.0
+    cooldown_seconds: float = 0.0
     recent_messages: int = 30
     max_pending_messages: int = 100
     retention_days: int = 30

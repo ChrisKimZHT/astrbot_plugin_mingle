@@ -70,10 +70,32 @@ async def test_separate_sessions_are_not_blocked_by_active_turn():
 
 
 @pytest.mark.asyncio
-async def test_cooldown_only_blocks_unforced_group_replies():
+async def test_default_cooldown_allows_the_next_group_batch_after_a_reply():
     judge = SimpleNamespace(should_reply=AsyncMock(return_value=True))
     scheduler = ChatScheduler(
         Settings(debounce_seconds=0),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        judge,
+        logging.getLogger(),
+    )
+    try:
+        first = await scheduler.submit(Event(), 1, False)
+        assert await asyncio.wait_for(first.ready, 1) == [1]
+        first.event.set_extra("mingle_agent_started", True)
+        first.finished.set()
+        second = await scheduler.submit(Event(), 2, False)
+        assert await asyncio.wait_for(second.ready, 1) == [2]
+        assert judge.should_reply.await_count == 2
+        second.finished.set()
+    finally:
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_cooldown_only_blocks_unforced_group_replies():
+    judge = SimpleNamespace(should_reply=AsyncMock(return_value=True))
+    scheduler = ChatScheduler(
+        Settings(debounce_seconds=0, cooldown_seconds=60),
         SimpleNamespace(get=AsyncMock(return_value=[])),
         judge,
         logging.getLogger(),

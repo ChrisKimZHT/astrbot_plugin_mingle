@@ -21,6 +21,11 @@
 - `src/scheduler.py` owns one pending queue and one active turn per unified session.
   It merges consecutive messages, bounds the merge wait and pending event count,
   applies proactive cooldown, and waits for the admitted handler to finish.
+- Proactive cooldown defaults to zero so normal conversation continues through
+  the judgment model after the two-second merge window. A positive configured
+  cooldown intentionally saves but skips ordinary messages during that period;
+  it does not schedule a retry when the period expires. Private and explicit
+  wake messages bypass cooldown. Do not reintroduce a long default silence.
 - `src/decision.py` calls a judgment provider without tools. An empty provider ID
   follows AstrBot's current session provider; another configured provider may be
   selected in the plugin settings. Invalid decisions and failures mean silence.
