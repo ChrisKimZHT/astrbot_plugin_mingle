@@ -3,11 +3,13 @@ import base64
 import json
 import uuid
 from collections.abc import AsyncGenerator
+from dataclasses import replace
 from sys import maxsize
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
+from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
@@ -23,6 +25,8 @@ from .settings import Settings
 class MinglePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
+        self.config = config
+        self.config_lock = asyncio.Lock()
         self.settings = Settings.from_config(config)
         self.history = ChatHistory(
             StarTools.get_data_dir("astrbot_plugin_mingle"), self.settings, self.logger
@@ -61,6 +65,68 @@ class MinglePlugin(Star):
             except Exception:
                 self.logger.exception("Mingle retention cleanup failed")
 
+    @filter.command_group("mingle")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    def mingle(self):
+        """Manage Mingle as an AstrBot administrator."""
+
+    @mingle.command("group")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def manage_group(self, event: AstrMessageEvent, state: str):
+        """Enable or disable Mingle in the current group.
+
+        Args:
+            event: Administrator command identifying the current group.
+            state: Either on or off.
+
+        Yields:
+            A configuration update result or usage guidance.
+        """
+        if event.is_private_chat() or not event.get_group_id():
+            yield event.plain_result("请在需要管理的群聊中使用此命令。")
+            return
+        if state not in {"on", "off"}:
+            yield event.plain_result("用法：/mingle group on 或 /mingle group off")
+            return
+        group_session = f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{event.get_group_id()}"
+        async with self.config_lock:
+            previous = list(self.config.get("group_sessions", []))
+            sessions = list(previous)
+            if state == "on":
+                if group_session not in sessions:
+                    sessions.append(group_session)
+            else:
+                matching = {
+                    group_session,
+                    event.unified_msg_origin,
+                    event.get_group_id(),
+                }
+                sessions = [item for item in sessions if item.strip() not in matching]
+            try:
+                await self.config.save_config_async({"group_sessions": sessions})
+            except Exception:
+                self.config["group_sessions"] = previous
+                self.logger.exception(
+                    "Failed to update Mingle group allowlist for %s", group_session
+                )
+                message = "保存配置失败，当前群聊的 Mingle 设置未更改。"
+            else:
+                self.settings = replace(self.settings, group_sessions=tuple(sessions))
+                self.scheduler.settings = self.settings
+                self.scheduler.judge.settings = self.settings
+                self.history.settings = self.settings
+                self.logger.info(
+                    "Mingle group allowlist updated for %s: %s", group_session, state
+                )
+                message = (
+                    "已启用当前群聊的 Mingle。"
+                    if state == "on"
+                    else "已关闭当前群聊的 Mingle。"
+                )
+                if state == "on" and not self.settings.enabled:
+                    message += "插件总开关当前关闭，需在配置中启用。"
+        yield event.plain_result(message)
+
     @filter.event_message_type(
         filter.EventMessageType.GROUP_MESSAGE | filter.EventMessageType.PRIVATE_MESSAGE,
         priority=maxsize - 1,
@@ -80,6 +146,7 @@ class MinglePlugin(Star):
             return
         if event.get_self_id() == event.get_sender_id():
             return
+        group_session = f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{event.get_group_id()}"
         if event.is_private_chat():
             if (
                 not self.settings.private_enabled
@@ -88,6 +155,7 @@ class MinglePlugin(Star):
                 return
         elif (
             event.unified_msg_origin not in self.settings.group_sessions
+            and group_session not in self.settings.group_sessions
             and event.get_group_id() not in self.settings.group_sessions
         ):
             return
@@ -130,6 +198,12 @@ class MinglePlugin(Star):
                 or event.is_stopped()
                 or event.get_extra("agent_stop_requested", False)
             ):
+                return
+            if not event.is_private_chat() and not {
+                event.unified_msg_origin,
+                group_session,
+                event.get_group_id(),
+            }.intersection(self.settings.group_sessions):
                 return
             conversation_manager = self.context.conversation_manager
             conversation_id = await conversation_manager.get_curr_conversation_id(

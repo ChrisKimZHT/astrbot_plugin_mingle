@@ -2,11 +2,13 @@ import asyncio
 import json
 import logging
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+from astrbot.api import AstrBotConfig
 from astrbot.core.message.components import Plain
 from astrbot.core.pipeline.context_utils import call_handler
 from astrbot.core.pipeline.process_stage.stage import ProcessStage
@@ -52,6 +54,10 @@ async def plugin(tmp_path, monkeypatch):
     instance = object.__new__(MinglePlugin)
     instance.logger = logging.getLogger("mingle.test")
     instance.settings = Settings(group_sessions=("group",), debounce_seconds=0)
+    instance.config = AstrBotConfig(
+        str(tmp_path / "config.json"), default_config={"group_sessions": ["group"]}
+    )
+    instance.config_lock = asyncio.Lock()
     instance.context = SimpleNamespace(
         get_config=lambda **kwargs: {"provider_settings": {"enable": True}},
         conversation_manager=SimpleNamespace(
@@ -225,3 +231,91 @@ async def test_unload_cancels_waiting_handlers_before_database_close(plugin):
     await asyncio.gather(task, return_exceptions=True)
     assert plugin.history.db is None
     assert not plugin.handlers
+
+
+@pytest.mark.asyncio
+async def test_group_management_persists_and_updates_all_runtime_settings(plugin):
+    event = make_event()
+    enabled = [value async for value in plugin.manage_group(event, "on")]
+    assert "已启用" in enabled[0].get_plain_text()
+    assert "p:GroupMessage:group" in plugin.settings.group_sessions
+    assert plugin.scheduler.settings is plugin.settings
+    assert plugin.scheduler.judge.settings is plugin.settings
+    assert plugin.history.settings is plugin.settings
+    persisted = json.loads(
+        Path(plugin.config.config_path).read_text(encoding="utf-8-sig")
+    )
+    assert persisted["group_sessions"] == ["group", "p:GroupMessage:group"]
+    [value async for value in plugin.manage_group(event, "on")]
+    assert plugin.config["group_sessions"].count("p:GroupMessage:group") == 1
+    plugin.config["group_sessions"].append("other:GroupMessage:other")
+    disabled = [value async for value in plugin.manage_group(event, "off")]
+    assert "已关闭" in disabled[0].get_plain_text()
+    assert plugin.settings.group_sessions == ("other:GroupMessage:other",)
+    persisted = json.loads(
+        Path(plugin.config.config_path).read_text(encoding="utf-8-sig")
+    )
+    assert persisted["group_sessions"] == ["other:GroupMessage:other"]
+
+
+@pytest.mark.asyncio
+async def test_group_management_rejects_private_chat_and_bad_arguments(plugin):
+    original = plugin.settings
+    results = [
+        value async for value in plugin.manage_group(make_event(private=True), "on")
+    ]
+    assert "群聊" in results[0].get_plain_text()
+    results = [value async for value in plugin.manage_group(make_event(), "unknown")]
+    assert "用法" in results[0].get_plain_text()
+    assert plugin.settings is original
+
+
+@pytest.mark.asyncio
+async def test_group_management_save_failure_leaves_runtime_unchanged(
+    plugin, monkeypatch
+):
+    original = plugin.settings
+    monkeypatch.setattr(
+        plugin.config, "save_config_async", AsyncMock(side_effect=OSError("disk full"))
+    )
+    results = [value async for value in plugin.manage_group(make_event(), "off")]
+    assert "保存配置失败" in results[0].get_plain_text()
+    assert plugin.settings is original
+    assert plugin.config["group_sessions"] == ["group"]
+
+
+def test_group_management_permission_is_registered_on_group_and_subcommand():
+    from astrbot.core.star.filter.permission import PermissionType, PermissionTypeFilter
+    from astrbot.core.star.star_handler import star_handlers_registry
+
+    handlers = star_handlers_registry.get_handlers_by_module_name(
+        MinglePlugin.__module__
+    )
+    for name in ("mingle", "manage_group"):
+        handler = next(item for item in handlers if item.handler_name == name)
+        permission = next(
+            item
+            for item in handler.event_filters
+            if isinstance(item, PermissionTypeFilter)
+        )
+        assert permission.permission_type == PermissionType.ADMIN
+        event = make_event()
+        assert not permission.filter(event, {})
+        event.role = "admin"
+        assert permission.filter(event, {})
+
+
+@pytest.mark.asyncio
+async def test_group_enable_applies_to_isolated_members_and_platform_scope(plugin):
+    [value async for value in plugin.manage_group(make_event(), "on")]
+    isolated = make_event("2")
+    isolated.session_id = "bob_group"
+    assert [value async for value in plugin.on_message(isolated)] == []
+    assert isolated.get_extra("mingle_managed")
+    # Remove the legacy bare ID so only the newly added platform-scoped rule applies.
+    plugin.settings = replace(plugin.settings, group_sessions=("p:GroupMessage:group",))
+    other = make_event("3")
+    other.session.platform_id = "other"
+    other.platform_meta.id = "other"
+    assert [value async for value in plugin.on_message(other)] == []
+    assert not other.get_extra("mingle_managed")

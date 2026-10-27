@@ -40,6 +40,14 @@
   these settings in AstrBot's configuration UI.
 - Group sessions must be explicitly listed. Prefer full UMO identifiers; bare
   group IDs are supported. Empty group configuration enables no group chats.
+- `/mingle group on|off` is restricted to AstrBot administrators, on both the
+  group registration and its concrete subcommand. Reject private-chat use.
+  Enable stores a platform-scoped group UMO; match that group UMO even when
+  AstrBot isolates member conversations. Disable removes the group UMO, current
+  event UMO, and legacy bare group ID, preserving unrelated allowlist entries.
+  Save the plugin config asynchronously under a lock before updating runtime
+  settings. On failure restore the in-memory config. Waiting events recheck
+  the allowlist before requesting an Agent; active turns are not interrupted.
 - Private messages are enabled by default and use the same scheduler. WebChat
   remains on its native flow. Private messages and explicit wake/mention events
   bypass the judgment model and proactive cooldown.
