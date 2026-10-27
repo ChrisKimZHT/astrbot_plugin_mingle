@@ -179,6 +179,12 @@
   Repeated content shares one file. Expiration is based on last receipt.
 - Validate image content, limit bytes read, use atomic file replacement, and
   return MCP image content to the Agent through `mingle_view_image`.
+- `src/images.py` prepares model-facing copies with AstrBot's public
+  `compress_image` utility: longest edge 1280 pixels and JPEG quality 85.
+  Convert GIFs to a static first frame before compression. Preserve original
+  cached bytes, report the actual output MIME type, and remove compressor temp
+  files after reading. Compression does not enforce a hard byte-size limit.
+  Preparation errors return a tool error instead of sending an oversized original.
 - Retention runs at startup, every five minutes, and after image-bearing writes.
   Unreferenced files left by interrupted writes are cleaned up as well.
 - No automatic image summaries in v0.1.0. Audio, video and other files have type

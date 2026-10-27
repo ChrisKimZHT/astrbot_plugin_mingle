@@ -19,6 +19,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from .src.debug import DebugDumper
 from .src.decision import ReplyJudge
 from .src.history import ChatHistory
+from .src.images import prepare_image
 from .src.scheduler import ChatScheduler
 from .src.settings import Settings
 
@@ -481,7 +482,7 @@ class MinglePlugin(Star):
     async def view_image(
         self, event: AstrMessageEvent, record_id: int, image_index: int = 0
     ) -> CallToolResult:
-        """Inspect a cached image referenced by a message in the current session.
+        """Inspect a cached image, using its first frame if it is a GIF.
 
         Args:
             record_id (int): Mingle message record ID from mingle_chat_history.
@@ -505,6 +506,16 @@ class MinglePlugin(Star):
                 ]
             )
         data, mime = image
+        try:
+            data, mime = await prepare_image(data, mime)
+        except Exception:
+            self.logger.exception(
+                "Failed to prepare Mingle image for record %s", record_id
+            )
+            return CallToolResult(
+                content=[TextContent(type="text", text="Image preparation failed.")],
+                isError=True,
+            )
         encoded = await asyncio.to_thread(base64.b64encode, data)
         return CallToolResult(
             content=[

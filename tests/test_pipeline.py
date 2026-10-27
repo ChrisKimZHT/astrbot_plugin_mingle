@@ -648,3 +648,75 @@ async def test_management_dispatcher_routes_complete_command_arguments(
             else plugin.settings.debug_sessions
         )
         assert (event.unified_msg_origin in sessions) is (state == "on")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("format", ["JPEG", "GIF", "PNG"])
+async def test_view_image_prepares_model_copy_and_preserves_original(
+    plugin, tmp_path, monkeypatch, format
+):
+    import base64
+    import io
+
+    from astrbot.core.message.components import Image as ImageComponent
+    from PIL import Image
+
+    temporary = tmp_path / "compressed"
+    temporary.mkdir()
+    monkeypatch.setattr(
+        "astrbot.core.utils.media_utils.get_astrbot_temp_path", lambda: str(temporary)
+    )
+    source = tmp_path / f"source.{format.lower()}"
+    with Image.new("RGB", (1800, 900), "red") as first:
+        if format == "GIF":
+            with Image.new("RGB", first.size, "blue") as second:
+                first.save(
+                    source,
+                    format=format,
+                    save_all=True,
+                    append_images=[second],
+                    duration=100,
+                    loop=0,
+                )
+        else:
+            first.save(source, format=format)
+    original = source.read_bytes()
+    event = make_event()
+    event.set_extra("mingle_managed", True)
+    record_id = await plugin.history.record(
+        event, [ImageComponent.fromFileSystem(source)]
+    )
+    result = await plugin.view_image(event, record_id)
+    assert not result.isError
+    content = result.content[0]
+    output = base64.b64decode(content.data)
+    with Image.open(io.BytesIO(output)) as image:
+        assert max(image.size) == 1280
+        assert image.size == (1280, 640)
+        assert getattr(image, "n_frames", 1) == 1
+        red, green, blue = image.convert("RGB").getpixel((0, 0))
+        assert red > 240 and green < 10 and blue < 10
+        assert content.mimeType == Image.MIME[image.format]
+    assert (await plugin.history.read_image(event.unified_msg_origin, record_id, 0))[
+        0
+    ] == original
+    assert source.read_bytes() == original
+    assert list(temporary.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_view_image_reports_preparation_failure_without_returning_original(
+    plugin, monkeypatch
+):
+    event = make_event()
+    event.set_extra("mingle_managed", True)
+    monkeypatch.setattr(
+        plugin.history, "read_image", AsyncMock(return_value=(b"invalid", "image/jpeg"))
+    )
+    monkeypatch.setattr(
+        "mingle_tests_plugin.main.prepare_image",
+        AsyncMock(side_effect=ValueError("invalid image")),
+    )
+    result = await plugin.view_image(event, 1)
+    assert result.isError is True
+    assert all(item.type == "text" for item in result.content)
