@@ -91,8 +91,8 @@ class MinglePlugin(Star):
             return
         group_session = f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{event.get_group_id()}"
         async with self.config_lock:
-            previous = list(self.config.get("group_sessions", []))
-            sessions = list(previous)
+            previous = dict(self.config["general"])
+            sessions = list(previous.get("group_sessions", []))
             if state == "on":
                 if group_session not in sessions:
                     sessions.append(group_session)
@@ -104,9 +104,11 @@ class MinglePlugin(Star):
                 }
                 sessions = [item for item in sessions if item.strip() not in matching]
             try:
-                await self.config.save_config_async({"group_sessions": sessions})
+                await self.config.save_config_async(
+                    {"general": {**previous, "group_sessions": sessions}}
+                )
             except Exception:
-                self.config["group_sessions"] = previous
+                self.config["general"] = previous
                 self.logger.exception(
                     "Failed to update Mingle group allowlist for %s", group_session
                 )
@@ -162,8 +164,12 @@ class MinglePlugin(Star):
         if not event.is_private_chat() and event.get_group_id():
             session = f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{event.get_group_id()}"
         async with self.config_lock:
-            previous = list(self.config.get("debug_sessions", []))
-            sessions = [item.strip() for item in previous if item.strip()]
+            previous = dict(self.config["debug"])
+            sessions = [
+                item.strip()
+                for item in previous.get("debug_sessions", [])
+                if item.strip()
+            ]
             if state == "on":
                 if session not in sessions:
                     sessions.append(session)
@@ -174,9 +180,11 @@ class MinglePlugin(Star):
                     if item not in {session, event.unified_msg_origin}
                 ]
             try:
-                await self.config.save_config_async({"debug_sessions": sessions})
+                await self.config.save_config_async(
+                    {"debug": {**previous, "debug_sessions": sessions}}
+                )
             except Exception:
-                self.config["debug_sessions"] = previous
+                self.config["debug"] = previous
                 self.logger.exception(
                     "Failed to update Mingle debug sessions for %s", session
                 )

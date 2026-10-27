@@ -56,7 +56,15 @@ async def plugin(tmp_path, monkeypatch):
     instance.logger = logging.getLogger("mingle.test")
     instance.settings = Settings(group_sessions=("group",), debounce_seconds=0)
     instance.config = AstrBotConfig(
-        str(tmp_path / "config.json"), default_config={"group_sessions": ["group"]}
+        str(tmp_path / "config.json"),
+        default_config={
+            "general": {
+                "enabled": True,
+                "private_enabled": True,
+                "group_sessions": ["group"],
+            },
+            "debug": {"debug_sessions": []},
+        },
     )
     instance.config_lock = asyncio.Lock()
     instance.debug_dumper = DebugDumper(
@@ -338,17 +346,19 @@ async def test_group_management_persists_and_updates_all_runtime_settings(plugin
     persisted = json.loads(
         Path(plugin.config.config_path).read_text(encoding="utf-8-sig")
     )
-    assert persisted["group_sessions"] == ["group", "p:GroupMessage:group"]
+    assert persisted["general"]["group_sessions"] == ["group", "p:GroupMessage:group"]
+    assert persisted["general"]["enabled"] is True
+    assert persisted["general"]["private_enabled"] is True
     [value async for value in plugin.manage_group(event, "on")]
-    assert plugin.config["group_sessions"].count("p:GroupMessage:group") == 1
-    plugin.config["group_sessions"].append("other:GroupMessage:other")
+    assert plugin.config["general"]["group_sessions"].count("p:GroupMessage:group") == 1
+    plugin.config["general"]["group_sessions"].append("other:GroupMessage:other")
     disabled = [value async for value in plugin.manage_group(event, "off")]
     assert "已关闭" in disabled[0].get_plain_text()
     assert plugin.settings.group_sessions == ("other:GroupMessage:other",)
     persisted = json.loads(
         Path(plugin.config.config_path).read_text(encoding="utf-8-sig")
     )
-    assert persisted["group_sessions"] == ["other:GroupMessage:other"]
+    assert persisted["general"]["group_sessions"] == ["other:GroupMessage:other"]
 
 
 @pytest.mark.asyncio
@@ -374,7 +384,7 @@ async def test_group_management_save_failure_leaves_runtime_unchanged(
     results = [value async for value in plugin.manage_group(make_event(), "off")]
     assert "保存配置失败" in results[0].get_plain_text()
     assert plugin.settings is original
-    assert plugin.config["group_sessions"] == ["group"]
+    assert plugin.config["general"]["group_sessions"] == ["group"]
 
 
 def test_group_management_permission_is_registered_on_group_and_subcommand():
@@ -428,17 +438,17 @@ async def test_debug_command_persists_current_chat_and_updates_runtime(plugin, p
     persisted = json.loads(
         Path(plugin.config.config_path).read_text(encoding="utf-8-sig")
     )
-    assert persisted["debug_sessions"] == [event.unified_msg_origin]
+    assert persisted["debug"]["debug_sessions"] == [event.unified_msg_origin]
     assert plugin.settings.group_sessions == original_groups
     [value async for value in plugin.manage_debug(event, "on")]
-    assert plugin.config["debug_sessions"] == [event.unified_msg_origin]
+    assert plugin.config["debug"]["debug_sessions"] == [event.unified_msg_origin]
     results = [value async for value in plugin.manage_debug(event, "off")]
     assert "已关闭" in results[0].get_plain_text()
     assert not plugin.debug_dumper.is_enabled(event)
     persisted = json.loads(
         Path(plugin.config.config_path).read_text(encoding="utf-8-sig")
     )
-    assert persisted["debug_sessions"] == []
+    assert persisted["debug"]["debug_sessions"] == []
 
 
 @pytest.mark.asyncio
@@ -456,7 +466,7 @@ async def test_debug_command_rejects_bad_arguments_and_recovers_from_save_failur
     assert "保存配置失败" in results[0].get_plain_text()
     assert plugin.settings is original
     assert plugin.debug_dumper.settings is original
-    assert plugin.config["debug_sessions"] == []
+    assert plugin.config["debug"]["debug_sessions"] == []
 
 
 @pytest.mark.asyncio

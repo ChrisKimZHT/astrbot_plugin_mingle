@@ -1,4 +1,23 @@
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
+
+CONFIG_GROUPS = {
+    "general": ("enabled", "group_sessions", "private_enabled"),
+    "scheduler": (
+        "debounce_seconds",
+        "max_wait_seconds",
+        "cooldown_seconds",
+        "max_pending_messages",
+    ),
+    "judge": (
+        "judge_provider_id",
+        "judge_prompt",
+        "judge_prompt_append",
+        "judge_timeout",
+    ),
+    "history": ("recent_messages", "retention_days", "max_messages_per_session"),
+    "images": ("image_retention_days", "image_cache_mb", "max_image_mb"),
+    "debug": ("debug_sessions",),
+}
 
 DEFAULT_JUDGE_PROMPT = (
     "Decide whether a bot should naturally join this conversation. "
@@ -54,7 +73,7 @@ class Settings:
         """Validate plugin configuration before starting background work.
 
         Args:
-            config: Values supplied by the AstrBot plugin configuration loader.
+            config: Grouped values supplied by the plugin configuration loader.
 
         Returns:
             Immutable runtime settings.
@@ -62,11 +81,12 @@ class Settings:
         Raises:
             ValueError: If a setting has an invalid type or range.
         """
-        values = {
-            field.name: config[field.name]
-            for field in fields(cls)
-            if field.name in config
-        }
+        values = {}
+        for group, names in CONFIG_GROUPS.items():
+            section = config.get(group, {})
+            if not isinstance(section, dict):
+                raise ValueError(f"{group} must be an object")
+            values.update({name: section[name] for name in names if name in section})
         for name in ("group_sessions", "debug_sessions"):
             sessions = values.get(name, ())
             if not isinstance(sessions, (list, tuple)) or not all(

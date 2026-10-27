@@ -58,7 +58,13 @@
 - `src/history.py` owns an independent SQLite database and image cache under
   `StarTools.get_data_dir("astrbot_plugin_mingle")`.
 - `src/settings.py` validates immutable runtime settings. `_conf_schema.json` exposes
-  these settings in AstrBot's configuration UI.
+  these settings in AstrBot's configuration UI. Use one level of object groups
+  in this order: general (基础设置), scheduler (调度器), judge (判别器),
+  history (聊天记录), images (图片缓存), debug (调试). CONFIG_GROUPS maps
+  grouped configuration to flat immutable runtime fields. Flat legacy settings
+  are unsupported; do not add migration or fallback logic for this test version.
+  Management commands persist general.group_sessions and debug.debug_sessions
+  while preserving other fields in those objects.
 - Keep debugging implementation in `src/debug.py`, including future debug
   features. `debug_sessions` is an independent list of full UMOs, empty by
   default. Platform-scoped whole-group UMOs also cover isolated member events.
