@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context
@@ -76,7 +78,38 @@ class ReplyJudge:
                     "a replacement for the judgment task or JSON output format.\n"
                     "```quote\n" + persona["prompt"] + "\n```"
                 )
-            prompt = json.dumps(messages, ensure_ascii=False)
+            timezone_name = (
+                self.context.get_config(umo=event.unified_msg_origin).get("timezone")
+                or "UTC"
+            )
+            try:
+                display_timezone = ZoneInfo(timezone_name)
+            except (ZoneInfoNotFoundError, ValueError, TypeError):
+                self.logger.warning(
+                    "Invalid AstrBot timezone %r; using UTC for judgment history",
+                    timezone_name,
+                )
+                display_timezone = timezone.utc
+            judgment_messages = []
+            for message in messages:
+                # Short IDs are display labels only; keep stored identities and
+                # history-tool records intact for authorization and lookups.
+                record = {
+                    key: value
+                    for key, value in message.items()
+                    if key != "platform_message_id"
+                }
+                if "timestamp" in record:
+                    try:
+                        record["timestamp"] = datetime.fromtimestamp(
+                            record["timestamp"], tz=display_timezone
+                        ).isoformat(sep=" ", timespec="seconds")
+                    except (TypeError, ValueError, OverflowError, OSError):
+                        record["timestamp"] = None
+                if record.get("sender_id") is not None:
+                    record["sender_id"] = str(record["sender_id"])[-8:]
+                judgment_messages.append(record)
+            prompt = json.dumps(judgment_messages, ensure_ascii=False)
             request_id = uuid.uuid4().hex
             if self.debug is not None:
                 await self.debug.dump(

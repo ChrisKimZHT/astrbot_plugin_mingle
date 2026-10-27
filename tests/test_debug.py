@@ -115,6 +115,7 @@ async def test_write_failure_does_not_propagate(dumper, event, tmp_path, caplog)
 @pytest.mark.parametrize("failure", [None, TimeoutError("provider timed out")])
 async def test_judge_dumps_input_and_output_or_error(dumper, event, failure):
     context = SimpleNamespace(
+        get_config=lambda **kwargs: {"timezone": "UTC"},
         conversation_manager=SimpleNamespace(
             get_curr_conversation_id=AsyncMock(return_value=None),
         ),

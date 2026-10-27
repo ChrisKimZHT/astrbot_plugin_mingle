@@ -24,6 +24,13 @@
 - `src/decision.py` calls a judgment provider without tools. An empty provider ID
   follows AstrBot's current session provider; another configured provider may be
   selected in the plugin settings. Invalid decisions and failures mean silence.
+- Compact only the judgment-model history input: format Unix timestamps as
+  readable date/time with the configured AstrBot timezone and numeric offset
+  (UTC fallback), shorten sender IDs to their last eight characters, and omit
+  `platform_message_id`. Work on copies; stored records, Agent history tools,
+  and identity/permission checks retain full IDs and original timestamps.
+  Invalid timestamps become null. Debug dumps preserve the compact prompt
+  string actually passed to the judgment provider.
 - Resolve the judgment persona with AstrBot's `resolve_selected_persona`, using
   the current conversation persona and session override rules. Put its prompt
   inside a `quote` fenced block in the stable system prompt, after fixed judgment
