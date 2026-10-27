@@ -8,8 +8,8 @@
 - Keep logs and code comments in English. Use Google-style docstrings for
   non-obvious methods. Keep modules cohesive; do not introduce small one-use
   helpers merely to shorten methods.
-- Do not write or expand README.md during the initial implementation phase.
-  The existing template README is intentionally left untouched.
+- Keep README.md concise and user-facing: describe capabilities, setup and
+  commands. Maintain implementation agreements here instead of in the README.
 
 ## Message and Agent flow
 
