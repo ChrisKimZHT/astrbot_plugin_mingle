@@ -19,8 +19,13 @@
   function-calling tools. Keep tool names, signatures and model-facing docstrings
   on the registered main.py methods; delegate execution with explicit dependencies.
   Storage stays in src/history.py and image preprocessing in src/images.py.
-  Reserve a root-level toolbox/ for optional general-purpose model tools when
-  requested; Mingle core must not depend on that optional toolbox.
+  Use root-level toolbox/ for additional general-purpose model tools; core
+  scheduling, decision and storage modules must not depend on that toolbox.
+  main.py registers these tools through the normal AstrBot lifecycle.
+  toolbox/time.py implements mingle_get_time with no model-supplied parameters.
+  Resolve the session's AstrBot timezone on each call; missing/invalid zones use
+  UTC. Include the date, time, numeric UTC offset, timezone and weekday. The tool
+  is usable outside managed Mingle turns and has no separate configuration.
 - Keep business modules in the `src/` package. The root `main.py` remains the
   AstrBot entry point and uses relative imports from `.src`. Keep tests in the
   root `tests/` directory and import business modules through the `src` package.
@@ -161,8 +166,9 @@
   Dynamic status stays out of the stable system prefix.
 - AstrBot session isolation is respected. To share a group's conversation across
   members, disable its `unique_session` option. Do not override isolation here.
-- Register the two Mingle tools normally. If a persona restricts its tools,
+- Register Mingle tools normally. If a persona restricts its tools,
   explicitly allow `mingle_chat_history` and `mingle_view_image` in that persona.
+  Allow optional toolbox tools such as mingle_get_time there when wanted.
   Do not bypass persona tool restrictions by silently injecting tools.
 - Tool docstring Args must list only model-supplied arguments with explicit
   Google-style types. AstrBot injects `event`; listing it in Args makes this

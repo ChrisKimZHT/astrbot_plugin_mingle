@@ -22,6 +22,7 @@ from .src.scheduler import ChatScheduler
 from .src.settings import Settings
 from .src.tools import history as history_tools
 from .src.tools import images as image_tools
+from .toolbox.time import get_current_time
 
 
 class MinglePlugin(Star):
@@ -548,6 +549,22 @@ class MinglePlugin(Star):
             record_id=record_id,
             image_index=image_index,
         )
+
+    @filter.llm_tool(name="mingle_get_time")
+    async def get_time(self, event: AstrMessageEvent) -> str:
+        """Get the current date, time, UTC offset and weekday in the session timezone.
+
+        Use this tool when the user asks about the current time or today's date.
+
+        Returns:
+            JSON with datetime, timezone and weekday; UTC is used if unconfigured
+            or if the configured timezone is invalid.
+        """
+        timezone_name = (
+            self.context.get_config(umo=event.unified_msg_origin).get("timezone")
+            or "UTC"
+        )
+        return get_current_time(timezone_name)
 
     async def terminate(self) -> None:
         """Stop plugin work before closing the database connection."""

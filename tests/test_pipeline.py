@@ -854,3 +854,35 @@ def test_history_image_cleanup_runs_before_request_debug_capture():
     assert handlers["clear_history_images"].extras_configs.get(
         "priority", 0
     ) > handlers["dump_agent_request"].extras_configs.get("priority", 0)
+
+
+@pytest.mark.asyncio
+async def test_time_tool_follows_session_config_without_managed_turn(plugin):
+    from datetime import datetime
+    from unittest.mock import Mock
+
+    event = make_event()
+    config = {"timezone": "Asia/Shanghai"}
+    plugin.context.get_config = Mock(return_value=config)
+    result = json.loads(await plugin.get_time(event))
+    plugin.context.get_config.assert_called_once_with(umo=event.unified_msg_origin)
+    assert not event.get_extra("mingle_managed")
+    assert result["timezone"] == "Asia/Shanghai"
+    assert (
+        datetime.fromisoformat(result["datetime"]).utcoffset().total_seconds()
+        == 8 * 3600
+    )
+    config.clear()
+    result = json.loads(await plugin.get_time(event))
+    assert result["timezone"] == "UTC"
+    assert datetime.fromisoformat(result["datetime"]).utcoffset().total_seconds() == 0
+
+
+def test_time_tool_registration_has_no_model_supplied_parameters():
+    from astrbot.core.provider.register import llm_tools
+
+    tool = llm_tools.get_func("mingle_get_time")
+    assert tool is not None
+    assert not tool.parameters.get("properties")
+    assert not tool.parameters.get("required")
+    assert tool.handler.__module__ == MinglePlugin.__module__
