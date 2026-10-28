@@ -3,14 +3,13 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context
 
 from .debug import DebugDumper
+from .prompt_history import format_prompt_history
 from .settings import Settings
 
 
@@ -124,41 +123,16 @@ class ReplyJudge:
                     "a replacement for the judgment task or JSON output format.\n"
                     "```quote\n" + persona["prompt"] + "\n```"
                 )
-            timezone_name = (
-                self.context.get_config(umo=event.unified_msg_origin).get("timezone")
-                or "UTC"
+            judgment_messages = format_prompt_history(
+                messages,
+                self.context.get_config(umo=event.unified_msg_origin).get("timezone"),
             )
-            try:
-                display_timezone = ZoneInfo(timezone_name)
-            except (ZoneInfoNotFoundError, ValueError, TypeError):
-                self.logger.warning(
-                    "Invalid AstrBot timezone %r; using UTC for judgment history",
-                    timezone_name,
-                )
-                display_timezone = timezone.utc
-            judgment_messages = []
             status_data = message_status or {}
             new_ids = set(new_message_ids or status_data.get("judging", []))
             processing_ids = set(status_data.get("active", []))
             queued_ids = set(status_data.get("queued", []))
             include_status = message_status is not None or new_message_ids is not None
-            for message in messages:
-                # Short IDs are display labels only; keep stored identities and
-                # history-tool records intact for authorization and lookups.
-                record = {
-                    key: value
-                    for key, value in message.items()
-                    if key not in {"platform_message_id", "is_new", "sent_to_agent"}
-                }
-                if "timestamp" in record:
-                    try:
-                        record["timestamp"] = datetime.fromtimestamp(
-                            record["timestamp"], tz=display_timezone
-                        ).isoformat(sep=" ", timespec="seconds")
-                    except (TypeError, ValueError, OverflowError, OSError):
-                        record["timestamp"] = None
-                if record.get("sender_id") is not None:
-                    record["sender_id"] = str(record["sender_id"])[-8:]
+            for record in judgment_messages:
                 if include_status:
                     record_id = record.get("id")
                     if record_id in new_ids:
@@ -170,7 +144,6 @@ class ReplyJudge:
                     else:
                         # History means context only, not proof of a sent reply.
                         record["status"] = "history"
-                judgment_messages.append(record)
             prompt_data = (
                 {"messages": judgment_messages} if include_status else judgment_messages
             )

@@ -21,6 +21,7 @@ from mcp.types import CallToolResult
 from .src.debug import DebugDumper
 from .src.decision import ReplyJudge
 from .src.history import ChatHistory, boundary_group
+from .src.prompt_history import format_prompt_history
 from .src.scheduler import ChatScheduler
 from .src.settings import Settings
 from .src.tools import history as history_tools
@@ -384,9 +385,13 @@ class MinglePlugin(Star):
                 boundary=boundary_group(event),
             )
             # New arrivals remain queryable without starting a concurrent Agent.
+            prompt_history = format_prompt_history(
+                recent,
+                self.context.get_config(umo=event.unified_msg_origin).get("timezone"),
+            )
             prompt = (
                 f"New batch record IDs: {batch_ids}. Snapshot ends at record {max(batch_ids)}.\n"
-                + json.dumps(recent, ensure_ascii=False)
+                + json.dumps(prompt_history, ensure_ascii=False)
             )
             if event.get_extra("mingle_resume_after_rerun", False):
                 prompt = (

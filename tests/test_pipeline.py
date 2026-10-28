@@ -23,6 +23,7 @@ from mingle_tests_plugin.main import MinglePlugin
 from mingle_tests_plugin.src.debug import DebugDumper
 from mingle_tests_plugin.src.decision import ReplyJudge
 from mingle_tests_plugin.src.history import ChatHistory
+from mingle_tests_plugin.src.prompt_history import format_prompt_history
 from mingle_tests_plugin.src.scheduler import ChatScheduler
 from mingle_tests_plugin.src.settings import Settings
 
@@ -155,7 +156,7 @@ async def test_generator_prompt_uses_configured_text_verbatim(
         record_id = records[0]["id"]
         expected = (
             f"New batch record IDs: [{record_id}]. Snapshot ends at record {record_id}.\n"
-            + json.dumps(records, ensure_ascii=False)
+            + json.dumps(format_prompt_history(records, None), ensure_ascii=False)
         )
         if rerun:
             expected = (
@@ -173,6 +174,48 @@ async def test_generator_prompt_uses_configured_text_verbatim(
         assert request.prompt == expected
         assert request.conversation.cid == "conversation"
         assert request.contexts == []
+    finally:
+        await handler.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "zone,expected_time",
+    [
+        ("Asia/Shanghai", "1970-01-01 08:00:00+08:00"),
+        ("Invalid/Zone", "1970-01-01 00:00:00+00:00"),
+        (None, "1970-01-01 00:00:00+00:00"),
+    ],
+)
+async def test_generator_and_judge_share_chat_record_format(
+    plugin, zone, expected_time
+):
+    plugin.context.get_config = lambda **kwargs: {
+        "provider_settings": {"enable": True},
+        "timezone": zone,
+    }
+    event = make_event(private=True)
+    event.message_obj.timestamp = 0
+    event.message_obj.sender.user_id = "full-sender-12345678"
+    handler = plugin.on_message(event)
+    try:
+        request = await asyncio.wait_for(anext(handler), 1)
+        original = await plugin.history.get(event.unified_msg_origin)
+        await ReplyJudge(plugin.context, plugin.settings, plugin.logger).evaluate(
+            event, original
+        )
+        judge_records = json.loads(
+            plugin.context.llm_generate.call_args.kwargs["prompt"]
+        )
+        generator_records = json.loads(request.prompt.split("\n", 1)[1])
+        assert generator_records == judge_records
+        assert generator_records[0]["timestamp"] == expected_time
+        assert generator_records[0]["sender_id"] == "12345678"
+        assert "platform_message_id" not in generator_records[0]
+        assert original[0]["timestamp"] == 0
+        assert original[0]["sender_id"] == "full-sender-12345678"
+        assert "platform_message_id" in original[0]
+        assert await plugin.history.get(event.unified_msg_origin) == original
     finally:
         await handler.aclose()
 
