@@ -18,6 +18,35 @@ from pydantic import BaseModel
 from .settings import Settings
 
 
+def _serialize_debug_value(value: object) -> object:
+    """Serialize framework values without copying executable tool handlers.
+
+    Args:
+        value: Value that the JSON encoder cannot serialize directly.
+
+    Returns:
+        JSON-compatible fields, normalized values or a string representation.
+    """
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="python")
+    if is_dataclass(value) and not isinstance(value, type):
+        # Handlers can retain the entire plugin context; never deepcopy them.
+        return {
+            field.name: getattr(value, field.name)
+            for field in fields(value)
+            if field.name not in {"handler", "handler_module_path"}
+        }
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return {"encoding": "base64", "data": base64.b64encode(value).decode("ascii")}
+    return str(value)
+
+
 def _render_debug_value(value: object) -> str:
     """Render JSON values recursively as escaped HTML tables.
 
@@ -176,57 +205,42 @@ class DebugDumper:
             "payload": payload,
         }
 
-        def serialize(value):
-            if isinstance(value, BaseModel):
-                return value.model_dump(mode="python")
-            if is_dataclass(value) and not isinstance(value, type):
-                # Do not deepcopy tool handlers: they can retain the entire
-                # plugin context. Tool schemas and all message fields remain.
-                return {
-                    field.name: getattr(value, field.name)
-                    for field in fields(value)
-                    if field.name not in {"handler", "handler_module_path"}
-                }
-            if isinstance(value, Enum):
-                return value.value
-            if isinstance(value, Path):
-                return str(value)
-            if isinstance(value, datetime):
-                return value.isoformat()
-            if isinstance(value, bytes):
-                return {
-                    "encoding": "base64",
-                    "data": base64.b64encode(value).decode("ascii"),
-                }
-            return str(value)
-
-        def write_dump():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = path.with_suffix(".tmp")
-            html_temporary = html_path.with_suffix(".html.tmp")
-            try:
-                text = json.dumps(
-                    document, ensure_ascii=False, indent=2, default=serialize
-                )
-                temporary.write_text(text + "\n", encoding="utf-8")
-                temporary.replace(path)
-                # Render the serialized snapshot so HTML includes exactly the
-                # JSON fields, including SDK responses and normalized dataclasses.
-                html = render_debug_html(json.loads(text), path.name)
-                html_temporary.write_text(html, encoding="utf-8")
-                html_temporary.replace(html_path)
-                # Log from the worker too, so a completed write is announced
-                # even if its waiting pipeline task has just been cancelled.
-                self.logger.info("Mingle debug dump written: %s", html_path)
-            finally:
-                temporary.unlink(missing_ok=True)
-                html_temporary.unlink(missing_ok=True)
-
         try:
-            await asyncio.to_thread(write_dump)
+            await asyncio.to_thread(self._write_dump, path, document)
         except Exception:
             self.logger.warning(
                 "Failed to write Mingle debug dump: %s", html_path, exc_info=True
             )
             return None
         return path
+
+    def _write_dump(self, path: Path, document: dict) -> None:
+        """Write JSON and HTML using atomic replacements in the file IO worker.
+
+        Args:
+            path: Absolute destination for the JSON snapshot.
+            document: Plugin-layer snapshot including all payload fields.
+
+        Raises:
+            OSError: If writing or replacing files fails.
+            TypeError: If the snapshot cannot be serialized.
+        """
+        html_path = path.with_suffix(".html")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        html_temporary = html_path.with_suffix(".html.tmp")
+        try:
+            text = json.dumps(
+                document, ensure_ascii=False, indent=2, default=_serialize_debug_value
+            )
+            temporary.write_text(text + "\n", encoding="utf-8")
+            temporary.replace(path)
+            # Render serialized data so HTML contains exactly the JSON fields.
+            html = render_debug_html(json.loads(text), path.name)
+            html_temporary.write_text(html, encoding="utf-8")
+            html_temporary.replace(html_path)
+            # Announce success even if the waiting pipeline has been cancelled.
+            self.logger.info("Mingle debug dump written: %s", html_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+            html_temporary.unlink(missing_ok=True)

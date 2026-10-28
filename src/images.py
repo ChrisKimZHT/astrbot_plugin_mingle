@@ -33,6 +33,14 @@ async def prepare_image(data: bytes, mime: str) -> tuple[bytes, str]:
     source = f"data:{mime};base64,{encoded.decode('ascii')}"
     compressed = await compress_image(source, max_size=1280, quality=85)
     if compressed == source:
+        # The framework also returns the source on compression failure. Only
+        # accept it when it is a valid image already within the dimension limit.
+        with await asyncio.to_thread(Image.open, io.BytesIO(data)) as image:
+            if max(image.size) > 1280:
+                raise ValueError(
+                    "Image compression did not enforce the dimension limit"
+                )
+            await asyncio.to_thread(image.verify)
         return data, mime
 
     path = Path(compressed)

@@ -62,7 +62,6 @@ def redact_text(text: str) -> str:
     Returns:
         Redacted text. Matching is heuristic and does not inspect attachments.
     """
-
     # Redact credentials first so their contents cannot become partial markers.
     text = _PRIVATE_KEY.sub("[私钥]", text)
     text = _SECRET_FIELD.sub(r"\g<label>\g<separator>[凭据]", text)

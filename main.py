@@ -6,7 +6,7 @@ from dataclasses import replace
 from sys import maxsize
 
 from astrbot.api import AstrBotConfig
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.platform.message_type import MessageType
@@ -73,7 +73,9 @@ class MinglePlugin(Star):
 
     @filter.command("mingle")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def mingle(self, event: AstrMessageEvent, args: GreedyStr):
+    async def mingle(
+        self, event: AstrMessageEvent, args: GreedyStr
+    ) -> AsyncGenerator[MessageEventResult, None]:
         """Dispatch management commands or show the plugin-owned help tree.
 
         Args:
@@ -84,7 +86,11 @@ class MinglePlugin(Star):
             Management results or plain-text command help.
         """
         parts = args.split()
-        if len(parts) != 2 or parts[0] not in {"group", "debug"}:
+        if (
+            len(parts) != 2
+            or parts[0] not in {"group", "debug"}
+            or parts[1] not in {"on", "off"}
+        ):
             yield event.plain_result(
                 "mingle\n"
                 "├── group on|off\n"
@@ -97,7 +103,9 @@ class MinglePlugin(Star):
         async for result in handler(event, parts[1]):
             yield result
 
-    async def manage_group(self, event: AstrMessageEvent, state: str):
+    async def manage_group(
+        self, event: AstrMessageEvent, state: str
+    ) -> AsyncGenerator[MessageEventResult, None]:
         """Enable or disable Mingle in the current group.
 
         Args:
@@ -169,7 +177,9 @@ class MinglePlugin(Star):
                     message += "插件总开关当前关闭，需在配置中启用。"
         yield event.plain_result(message)
 
-    async def manage_debug(self, event: AstrMessageEvent, state: str):
+    async def manage_debug(
+        self, event: AstrMessageEvent, state: str
+    ) -> AsyncGenerator[MessageEventResult, None]:
         """Enable or disable debug dumps in the current group or private chat.
 
         Args:
@@ -605,7 +615,7 @@ class MinglePlugin(Star):
 
         Supports decimal numbers, parentheses, + - * / // % and **. Write a
         percentage as division by 100. Names, calls and other Python syntax are
-        forbidden. Results are decimal strings, rounded to 28 significant digits.
+        forbidden. Arithmetic uses 28 significant digits and returns decimal strings.
 
         Args:
             expression (str): At most 256 characters and 64 AST nodes. Values

@@ -21,6 +21,38 @@ from .redaction import redact_text
 from .settings import Settings
 
 
+def _copy_image(path: Path, directory: Path, max_bytes: int) -> tuple[str, int]:
+    """Copy bounded image bytes to an atomic content-addressed cache file.
+
+    Args:
+        path: Incoming image file available during event handling.
+        directory: Plugin-owned image cache directory.
+        max_bytes: Maximum number of bytes permitted per image.
+
+    Returns:
+        Content digest and encoded byte count.
+
+    Raises:
+        ValueError: If the input exceeds the byte limit.
+        OSError: If reading or writing fails.
+    """
+    # Limit reads too: a file can grow after a size check.
+    with path.open("rb") as stream:
+        data = stream.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError("Image exceeds the per-file cache limit")
+    digest = hashlib.sha256(data).hexdigest()
+    target = directory / digest
+    if not target.exists():
+        temporary = directory / f"{digest}.{uuid.uuid4().hex}.tmp"
+        try:
+            temporary.write_bytes(data)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return digest, len(data)
+
+
 class ChatHistory:
     """Own chat records and bounded, content-addressed image storage."""
 
@@ -107,30 +139,12 @@ class ChatHistory:
                         if not mime or not mime.startswith("image/"):
                             raise ValueError("Unsupported image content")
 
-                        def copy_image():
-                            # Limit reads too: a file can grow after the size check.
-                            with path.open("rb") as stream:
-                                data = stream.read(
-                                    self.settings.max_image_mb * 1024 * 1024 + 1
-                                )
-                            if len(data) > self.settings.max_image_mb * 1024 * 1024:
-                                raise ValueError(
-                                    "Image exceeds the per-file cache limit"
-                                )
-                            digest = hashlib.sha256(data).hexdigest()
-                            target = self.images / digest
-                            if not target.exists():
-                                temporary = (
-                                    self.images / f"{digest}.{uuid.uuid4().hex}.tmp"
-                                )
-                                try:
-                                    temporary.write_bytes(data)
-                                    temporary.replace(target)
-                                finally:
-                                    temporary.unlink(missing_ok=True)
-                            return digest, len(data)
-
-                        digest, size = await asyncio.to_thread(copy_image)
+                        digest, size = await asyncio.to_thread(
+                            _copy_image,
+                            path,
+                            self.images,
+                            self.settings.max_image_mb * 1024 * 1024,
+                        )
                         async with self.lock:
                             await self.db.execute(
                                 "INSERT INTO images VALUES (?, ?, ?, ?) "

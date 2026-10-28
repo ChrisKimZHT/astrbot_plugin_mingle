@@ -613,7 +613,18 @@ async def test_history_tool_returns_stored_records(plugin):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("args", ["", "group", "debug", "unknown", "group on extra"])
+@pytest.mark.parametrize(
+    "args",
+    [
+        "",
+        "group",
+        "debug",
+        "unknown",
+        "group on extra",
+        "group unknown",
+        "debug unknown",
+    ],
+)
 async def test_management_help_uses_tree_format_without_changing_settings(plugin, args):
     from astrbot.core.star.star_handler import star_handlers_registry
 
@@ -754,6 +765,51 @@ async def test_view_image_reports_preparation_failure_without_returning_original
     monkeypatch.setattr(
         "mingle_tests_plugin.src.tools.images.prepare_image",
         AsyncMock(side_effect=ValueError("invalid image")),
+    )
+    result = await plugin.view_image(event, 1)
+    assert result.isError is True
+    assert all(item.type == "text" for item in result.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(10, 10), (1800, 900)])
+async def test_unchanged_compressor_output_requires_valid_dimensions(
+    plugin, monkeypatch, size
+):
+    import io
+
+    from PIL import Image
+
+    with Image.new("RGB", size, "red") as image, io.BytesIO() as buffer:
+        image.save(buffer, format="PNG")
+        data = buffer.getvalue()
+    event = make_event()
+    event.set_extra("mingle_managed", True)
+    monkeypatch.setattr(
+        plugin.history, "read_image", AsyncMock(return_value=(data, "image/png"))
+    )
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.images.compress_image",
+        AsyncMock(side_effect=lambda source, **kwargs: source),
+    )
+    result = await plugin.view_image(event, 1)
+    assert bool(result.isError) is (max(size) > 1280)
+    if result.isError:
+        assert all(item.type == "text" for item in result.content)
+    else:
+        assert result.content[0].type == "image"
+
+
+@pytest.mark.asyncio
+async def test_unchanged_compressor_output_rejects_corrupt_image(plugin, monkeypatch):
+    event = make_event()
+    event.set_extra("mingle_managed", True)
+    monkeypatch.setattr(
+        plugin.history, "read_image", AsyncMock(return_value=(b"invalid", "image/png"))
+    )
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.images.compress_image",
+        AsyncMock(side_effect=lambda source, **kwargs: source),
     )
     result = await plugin.view_image(event, 1)
     assert result.isError is True

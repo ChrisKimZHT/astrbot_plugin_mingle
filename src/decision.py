@@ -171,11 +171,9 @@ class ReplyJudge:
                         # History means context only, not proof of a sent reply.
                         record["status"] = "history"
                 judgment_messages.append(record)
-            prompt_data = judgment_messages
-            if include_status:
-                prompt_data = {
-                    "messages": judgment_messages,
-                }
+            prompt_data = (
+                {"messages": judgment_messages} if include_status else judgment_messages
+            )
             prompt = json.dumps(prompt_data, ensure_ascii=False)
             request_id = uuid.uuid4().hex
             if self.debug is not None:

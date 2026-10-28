@@ -8,6 +8,9 @@
 - Keep logs and code comments in English. Use Google-style docstrings for
   non-obvious methods. Keep modules cohesive; do not introduce small one-use
   helpers merely to shorten methods.
+- Keep production helper functions at module or class scope rather than nesting
+  them inside methods. Pass file IO worker inputs explicitly instead of capturing
+  mutable runtime state in closures.
 - Keep README.md concise and user-facing: describe capabilities, setup and
   commands. Maintain implementation agreements here instead of in the README.
 

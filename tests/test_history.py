@@ -131,6 +131,21 @@ async def test_image_size_limit_and_invalid_content(history, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_valid_image_header_cannot_bypass_cache_byte_limit(history, tmp_path):
+    history.settings = replace(history.settings, max_image_mb=1)
+    path = tmp_path / "oversized.png"
+    data = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII="
+    )
+    path.write_bytes(data + b"\0" * (1024 * 1024))
+    record_id = await history.record(Event(), [Image.fromFileSystem(path)])
+    assert await history.read_image("p:GroupMessage:g", record_id, 0) is None
+    records = await history.get("p:GroupMessage:g")
+    assert records[0]["images"] == [{"index": 0, "available": False}]
+    assert not list(history.images.iterdir())
+
+
+@pytest.mark.asyncio
 async def test_deduplication_survives_restart(history):
     await history.record(Event(), [Plain("hello")])
     await history.close()
