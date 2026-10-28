@@ -9,6 +9,7 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.tool import ToolSet
+from astrbot.core.message.components import Plain
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.filter.command import CommandFilter, GreedyStr
@@ -355,6 +356,9 @@ class MinglePlugin(Star):
                 return
             event.set_extra("mingle_turn_id", uuid.uuid4().hex)
             event.set_extra("mingle_agent_started", True)
+            # The final completion marker must not leak through streaming deltas
+            # before the pre-send hook can inspect the complete response.
+            event.set_extra("enable_streaming", False)
             self.logger.debug(
                 "Admitted Mingle turn for session %s with %d messages",
                 event.unified_msg_origin,
@@ -524,16 +528,57 @@ class MinglePlugin(Star):
         turn_id = event.get_extra("mingle_turn_id")
         if not self.available or not turn_id or response.role != "assistant":
             return
-        chain = response.result_chain
-        if chain is None and response.completion_text:
-            chain = event.plain_result(response.completion_text)
-        if chain is not None:
-            try:
+        try:
+            sent_texts = event.get_extra(
+                "_send_message_to_user_current_session_plain_texts", []
+            )
+            for index, text in enumerate(sent_texts):
+                await self.history.record(
+                    event,
+                    [Plain(text)],
+                    role="bot",
+                    source_key=f"bot:{turn_id}:sent:{index}",
+                )
+            chain = response.result_chain
+            if response.completion_text.strip() == "<finished>" and (
+                chain is None or all(isinstance(part, Plain) for part in chain.chain)
+            ):
+                return
+            if chain is None and response.completion_text:
+                chain = event.plain_result(response.completion_text)
+            if chain is not None:
                 await self.history.record(
                     event, chain.chain, role="bot", source_key=f"bot:{turn_id}"
                 )
-            except Exception:
-                self.logger.exception("Failed to record Mingle Agent response")
+        except Exception:
+            self.logger.exception("Failed to record Mingle Agent response")
+
+    @filter.on_llm_response(priority=-maxsize - 1)
+    async def suppress_finished_reply(
+        self, event: AstrMessageEvent, response: LLMResponse
+    ) -> None:
+        """Clear a standalone completion marker after the raw debug capture.
+
+        Args:
+            event: Managed turn owning the completed Agent response.
+            response: Final model response before outgoing chains are produced.
+        """
+        if not self.available or not event.get_extra("mingle_managed", False):
+            return
+        chain = response.result_chain
+        if (
+            response.role == "assistant"
+            and not response.tools_call_name
+            and (chain is None or all(isinstance(part, Plain) for part in chain.chain))
+            and response.completion_text.strip() == "<finished>"
+        ):
+            response.result_chain = None
+            response.completion_text = ""
+            event.set_extra("_llm_reasoning_content", "")
+            self.logger.debug(
+                "Suppressed Mingle completion marker for session %s",
+                event.unified_msg_origin,
+            )
 
     @filter.llm_tool(name="mingle_chat_history")
     async def chat_history(

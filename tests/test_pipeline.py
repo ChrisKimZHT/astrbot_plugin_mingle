@@ -116,6 +116,7 @@ async def test_private_and_mentions_bypass_judgment_and_bind_conversation(plugin
         assert "message" in request.prompt
         assert request.contexts == []
         assert event.get_extra("mingle_managed") is True
+        assert event.get_extra("enable_streaming") is False
         await handler.aclose()
     plugin.context.llm_generate.assert_not_awaited()
 
@@ -1161,4 +1162,86 @@ def test_toolbox_switches_run_before_request_debug_capture():
     assert (
         handlers["apply_toolbox_switches"].extras_configs["priority"]
         > handlers["dump_agent_request"].extras_configs["priority"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text,managed,llm,hidden",
+    [
+        ("<finished>", True, True, True),
+        (" \n<finished>\t", True, True, True),
+        ("Answer <finished>", True, True, False),
+        ("<finished> is a marker", True, True, False),
+        ("<finished>", False, True, False),
+        ("<finished>", True, False, False),
+        ("Normal reply", True, True, False),
+    ],
+)
+async def test_finished_marker_only_suppresses_standalone_managed_llm_text(
+    plugin, text, managed, llm, hidden
+):
+    event = make_event()
+    event.set_extra("mingle_managed", managed)
+    response = LLMResponse(role="assistant" if llm else "err", completion_text=text)
+    await plugin.suppress_finished_reply(event, response)
+    assert (response.completion_text == "") is hidden
+    assert not event.is_stopped()
+    if not hidden:
+        assert response.completion_text == text
+
+
+@pytest.mark.asyncio
+async def test_finished_marker_does_not_discard_media(plugin):
+    from astrbot.core.message.components import Image
+
+    event = make_event()
+    event.set_extra("mingle_managed", True)
+    result = event.plain_result("<finished>")
+    result.chain.append(Image.fromURL("https://example.com/image.png"))
+    response = LLMResponse(role="assistant", result_chain=result)
+    await plugin.suppress_finished_reply(event, response)
+    assert response.result_chain is result
+
+
+@pytest.mark.asyncio
+async def test_native_split_replies_are_recorded_and_finished_marker_stays_in_debug_only(
+    plugin,
+):
+    from astrbot.core.tools.message_tools import SendMessageToUserTool
+
+    event = make_event()
+    event.set_extra("mingle_managed", True)
+    event.set_extra("mingle_turn_id", "split-turn")
+    plugin.debug_dumper.settings = replace(
+        plugin.settings, debug_sessions=(event.unified_msg_origin,)
+    )
+    await plugin.dump_agent_request(
+        event, ProviderRequest(prompt="Two members asked different questions")
+    )
+    sender = SimpleNamespace(send_message=AsyncMock(return_value=True))
+    context = SimpleNamespace(context=SimpleNamespace(event=event, context=sender))
+    tool = SendMessageToUserTool()
+    for text in ("Alice: first answer", "Bob: second answer"):
+        result = await tool.call(context, messages=[{"type": "plain", "text": text}])
+        assert result.startswith("Message sent")
+    response = LLMResponse(role="assistant", completion_text="<finished>")
+    await plugin.record_response(event, response)
+    await plugin.record_response(event, response)
+    await plugin.dump_agent_response(event, response)
+    await plugin.suppress_finished_reply(event, response)
+    assert response.completion_text == ""
+    assert response.result_chain is None
+    assert not event.is_stopped()
+    assert sender.send_message.await_count == 2
+    rows = await plugin.history.get(event.unified_msg_origin)
+    assert [row["text"] for row in rows] == [
+        "Alice: first answer",
+        "Bob: second answer",
+    ]
+    assert all(row["role"] == "bot" for row in rows)
+    outputs = list(plugin.debug_dumper.directory.rglob("*agent_output*.json"))
+    assert (
+        json.loads(outputs[0].read_text(encoding="utf-8"))["payload"]["completion_text"]
+        == "<finished>"
     )

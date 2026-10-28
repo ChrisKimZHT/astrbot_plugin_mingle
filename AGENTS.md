@@ -89,6 +89,19 @@
   with DEFAULT_GENERATOR_PROMPT. Append batch metadata and chat JSON afterwards;
   prepend the fixed continuation notice for reruns. These instructions stay in
   the user prompt; AstrBot continues resolving the Agent persona normally.
+- Generator defaults allow separate current-chat replies through the native
+  send_message_to_user tool when multiple members and topics warrant it. Emit
+  exactly <finished> only after successful sends; fall back to normal output if
+  the tool is unavailable or fails. Do not inject tools beyond native availability.
+  Set enable_streaming=False on admitted managed events so the marker cannot
+  leak as deltas; do not change global streaming settings or unmanaged events.
+  Capture the raw final response in debug, then suppress standalone plain-text
+  <finished> assistant responses in a lower-priority response hook before outgoing
+  chains are produced. Do not stop the event. Do not treat text containing the
+  marker, mixed media, tool calls or error responses as the sentinel.
+  Record successful current-session native send-tool text with per-turn indexed
+  source keys; do not store the marker as a bot chat row. Normal Agent history
+  saving continues, including tool calls, results and the final completion marker.
 - `src/history.py` owns an independent SQLite database and image cache under
   `StarTools.get_data_dir("astrbot_plugin_mingle")`.
 - `src/settings.py` validates immutable runtime settings. `_conf_schema.json` exposes
