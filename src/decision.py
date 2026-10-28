@@ -175,6 +175,12 @@ class ReplyJudge:
                 {"messages": judgment_messages} if include_status else judgment_messages
             )
             prompt = json.dumps(prompt_data, ensure_ascii=False)
+            self.logger.info(
+                "Mingle judgment input for session %s: messages=%d, new=%d",
+                event.unified_msg_origin,
+                len(judgment_messages),
+                len(new_ids),
+            )
             request_id = uuid.uuid4().hex
             if self.debug is not None:
                 await self.debug.dump(
@@ -214,14 +220,32 @@ class ReplyJudge:
             if not isinstance(result, dict) or not isinstance(
                 result.get("should_reply"), bool
             ):
+                self.logger.info(
+                    "Mingle judgment result for session %s: invalid",
+                    event.unified_msg_origin,
+                )
                 return ReplyDecision()
             action = result.get("action", "wait")
             if action not in {"wait", "rerun", "stop"}:
+                self.logger.info(
+                    "Mingle judgment result for session %s: invalid",
+                    event.unified_msg_origin,
+                )
                 return ReplyDecision()
             if (action == "rerun" and not result["should_reply"]) or (
                 action == "stop" and result["should_reply"]
             ):
+                self.logger.info(
+                    "Mingle judgment result for session %s: invalid",
+                    event.unified_msg_origin,
+                )
                 return ReplyDecision()
+            self.logger.info(
+                "Mingle judgment result for session %s: should_reply=%s, action=%s",
+                event.unified_msg_origin,
+                result["should_reply"],
+                action,
+            )
             return ReplyDecision(
                 should_reply=result["should_reply"],
                 action=action,

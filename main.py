@@ -404,10 +404,11 @@ class MinglePlugin(Star):
             # The final completion marker must not leak through streaming deltas
             # before the pre-send hook can inspect the complete response.
             event.set_extra("enable_streaming", False)
-            self.logger.debug(
-                "Admitted Mingle turn for session %s with %d messages",
+            self.logger.info(
+                "Admitted Mingle turn for session %s: batch=%d, prompt_history=%d",
                 event.unified_msg_origin,
                 len(batch_ids),
+                len(recent),
             )
             yield event.request_llm(prompt=prompt, conversation=conversation)
         except asyncio.CancelledError:

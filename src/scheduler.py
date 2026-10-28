@@ -127,6 +127,14 @@ class ChatScheduler:
             # Keep direct-address intent even when its original event is merged away.
             state.pending[0].forced |= oldest.forced
             oldest.release()
+        self.logger.info(
+            "Mingle queue for session %s: pending=%d, judging=%d, approved=%d, active=%d",
+            key,
+            len(state.pending),
+            len(state.judging),
+            len(state.approved),
+            len(state.active_ids),
+        )
         state.changed.set()
         if state.judgment_task is None or state.judgment_task.done():
             state.judgment_task = asyncio.create_task(self._judge_pending(key, state))
@@ -193,6 +201,16 @@ class ChatScheduler:
                             self._execute_approved(key, state)
                         )
                 state.judging = []
+                self.logger.info(
+                    "Mingle batch for session %s: messages=%d, forced=%s, admitted=%s; pending=%d, approved=%d, active=%d",
+                    key,
+                    len(batch),
+                    forced,
+                    allowed and not self.closed and not leader.ready.done(),
+                    len(state.pending),
+                    len(state.approved),
+                    len(state.active_ids),
+                )
                 batch = []
         except asyncio.CancelledError:
             raise
@@ -314,6 +332,9 @@ class ChatScheduler:
                 new_message_ids=[item.record_id for item in batch],
             )
         if any(item.forced for item in batch):
+            self.logger.info(
+                "Mingle judgment bypassed for forced idle batch in session %s", key
+            )
             return ReplyDecision(True)
         return ReplyDecision(
             await self.judge.should_reply(
@@ -408,6 +429,13 @@ class ChatScheduler:
                     state.last_agent_finished_at = monotonic()
                 state.active = None
                 state.active_ids = []
+                self.logger.info(
+                    "Mingle Agent finished for session %s: outcome=%s, pending=%d, approved=%d",
+                    key,
+                    outcome,
+                    len(state.pending),
+                    len(state.approved),
+                )
                 state.changed.set()
         except asyncio.CancelledError:
             raise
