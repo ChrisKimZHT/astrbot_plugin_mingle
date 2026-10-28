@@ -80,12 +80,19 @@
 - The default judgment instructions reject clearly unfinished user input,
   including incomplete sentences and messages being sent in multiple parts,
   with `should_reply=false` so subsequent content can arrive first.
+- Generator instructions use generator.generator_prompt and
+  generator.generator_prompt_append, concatenated verbatim without trimming,
+  interpolation or an implicit separator. Keep the schema default synchronized
+  with DEFAULT_GENERATOR_PROMPT. Append batch metadata and chat JSON afterwards;
+  prepend the fixed continuation notice for reruns. These instructions stay in
+  the user prompt; AstrBot continues resolving the Agent persona normally.
 - `src/history.py` owns an independent SQLite database and image cache under
   `StarTools.get_data_dir("astrbot_plugin_mingle")`.
 - `src/settings.py` validates immutable runtime settings. `_conf_schema.json` exposes
   these settings in AstrBot's configuration UI. Use one level of object groups
   in this order: general (基础设置), scheduler (调度器), judge (判别器),
-  history (聊天记录), images (图片缓存), debug (调试), toolbox (额外工具箱).
+  generator (生成器), history (聊天记录), images (图片缓存), debug (调试),
+  toolbox (额外工具箱).
   CONFIG_GROUPS maps
   grouped configuration to flat immutable runtime fields. Flat legacy settings
   are unsupported; do not add migration or fallback logic for this test version.

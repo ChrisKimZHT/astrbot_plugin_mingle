@@ -133,6 +133,44 @@ async def test_declined_message_stops_fallback_and_is_still_queryable(plugin):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "base,append", [(" Base {literal}\n", "\nAppend  "), ("", "Only append"), ("", "")]
+)
+@pytest.mark.parametrize("rerun", [False, True])
+async def test_generator_prompt_uses_configured_text_verbatim(
+    plugin, base, append, rerun
+):
+    plugin.settings = replace(
+        plugin.settings, generator_prompt=base, generator_prompt_append=append
+    )
+    event = make_event(private=True)
+    event.set_extra("mingle_resume_after_rerun", rerun)
+    handler = plugin.on_message(event)
+    try:
+        request = await asyncio.wait_for(anext(handler), 1)
+        records = await plugin.history.get(event.unified_msg_origin)
+        record_id = records[0]["id"]
+        expected = (
+            base
+            + append
+            + f"\n\nNew batch record IDs: [{record_id}]. Snapshot ends at record {record_id}.\n"
+            + json.dumps(records, ensure_ascii=False)
+        )
+        if rerun:
+            expected = (
+                "The previous Agent turn was stopped because new messages corrected "
+                "or redirected the task. Continue from its saved history, apply the "
+                "new messages below, and reuse completed tool results when relevant.\n\n"
+                + expected
+            )
+        assert request.prompt == expected
+        assert request.conversation.cid == "conversation"
+        assert request.contexts == []
+    finally:
+        await handler.aclose()
+
+
+@pytest.mark.asyncio
 async def test_commands_and_nonconfigured_groups_remain_unmanaged(plugin):
     event = make_event()
     event.set_extra(

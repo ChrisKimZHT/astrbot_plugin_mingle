@@ -20,6 +20,9 @@ from mingle_tests_plugin.src.settings import Settings
         {"judge": {"judge_provider_id": 1}},
         {"judge": {"judge_prompt": None}},
         {"judge": {"judge_prompt_append": 123}},
+        {"generator": {"generator_prompt": None}},
+        {"generator": {"generator_prompt_append": 123}},
+        {"generator": []},
         {"general": []},
         {"scheduler": None},
         {"toolbox": {"toolbox_enabled": "false"}},
@@ -44,6 +47,16 @@ def test_schema_defaults_match_runtime_settings(tmp_path):
     )
     config = AstrBotConfig(str(tmp_path / "config.json"), schema=schema)
     assert Settings.from_config(config) == Settings()
+    assert list(schema) == [
+        "general",
+        "scheduler",
+        "judge",
+        "generator",
+        "history",
+        "images",
+        "debug",
+        "toolbox",
+    ]
     assert Settings.from_config(
         {"general": {"group_sessions": ["  group  ", ""]}}
     ).group_sessions == ("group",)
@@ -55,6 +68,10 @@ def test_grouped_settings_load_custom_values():
             "general": {"enabled": False, "private_enabled": False},
             "scheduler": {"debounce_seconds": 3, "max_wait_seconds": 9},
             "judge": {"judge_provider_id": "custom", "judge_prompt_append": "extra"},
+            "generator": {
+                "generator_prompt": "base",
+                "generator_prompt_append": "\nextra",
+            },
             "history": {"recent_messages": 15, "retention_days": 10},
             "images": {"image_cache_mb": 128, "max_image_mb": 5},
             "debug": {"debug_sessions": ["p:FriendMessage:alice"]},
@@ -68,6 +85,8 @@ def test_grouped_settings_load_custom_values():
         max_wait_seconds=9,
         judge_provider_id="custom",
         judge_prompt_append="extra",
+        generator_prompt="base",
+        generator_prompt_append="\nextra",
         recent_messages=15,
         retention_days=10,
         image_cache_mb=128,
