@@ -659,6 +659,7 @@ async def test_group_management_save_failure_leaves_runtime_unchanged(
 
 
 def test_management_commands_use_native_group_and_admin_permissions():
+    from astrbot.core.star.command_management import _build_descriptor
     from astrbot.core.star.filter.command_group import CommandGroupFilter
     from astrbot.core.star.filter.permission import PermissionType, PermissionTypeFilter
     from astrbot.core.star.star_handler import star_handlers_registry
@@ -688,8 +689,18 @@ def test_management_commands_use_native_group_and_admin_permissions():
         group.filter(event, {})
     for name in ("group", "debug", "barrier"):
         assert name in str(error.value)
+    assert "Args:" not in str(error.value)
+    assert "Yields:" not in str(error.value)
+    assert "开启或关闭当前群聊：on|off" in str(error.value)
+    assert "开启或关闭当前会话调试：on|off" in str(error.value)
+    assert "管理群聊记录边界：set 设置，find 查看，clear 清除" in str(error.value)
+    assert root.desc == "管理 Mingle 群聊、调试和记录边界"
     for command in group.sub_command_filters:
         handler = command.get_handler_md()
+        assert handler.extras_configs.get("sub_command") is True
+        descriptor = _build_descriptor(handler)
+        assert descriptor.is_sub_command
+        assert descriptor.parent_group_handler == root.handler_full_name
         permission = next(
             item
             for item in handler.event_filters

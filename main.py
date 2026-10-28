@@ -76,12 +76,14 @@ class MinglePlugin(Star):
                 self.logger.exception("Mingle retention cleanup failed")
 
     @filter.command_group("mingle")
-    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.permission_type(
+        filter.PermissionType.ADMIN, desc="管理 Mingle 群聊、调试和记录边界"
+    )
     def mingle(self):
         """Manage Mingle group access, debugging and history boundaries."""
 
-    @mingle.command("barrier")
     @filter.permission_type(filter.PermissionType.ADMIN)
+    @mingle.command("barrier", desc="管理群聊记录边界：set 设置，find 查看，clear 清除")
     async def manage_barrier(
         self, event: AstrMessageEvent, action: str
     ) -> AsyncGenerator[MessageEventResult, None]:
@@ -131,8 +133,8 @@ class MinglePlugin(Star):
             message = "操作群聊记录边界失败，请查看日志。"
         yield event.plain_result(message).use_markdown(False)
 
-    @mingle.command("group")
     @filter.permission_type(filter.PermissionType.ADMIN)
+    @mingle.command("group", desc="开启或关闭当前群聊：on|off")
     async def manage_group(
         self, event: AstrMessageEvent, state: str
     ) -> AsyncGenerator[MessageEventResult, None]:
@@ -207,8 +209,8 @@ class MinglePlugin(Star):
                     message += "插件总开关当前关闭，需在配置中启用。"
         yield event.plain_result(message)
 
-    @mingle.command("debug")
     @filter.permission_type(filter.PermissionType.ADMIN)
+    @mingle.command("debug", desc="开启或关闭当前会话调试：on|off")
     async def manage_debug(
         self, event: AstrMessageEvent, state: str
     ) -> AsyncGenerator[MessageEventResult, None]:

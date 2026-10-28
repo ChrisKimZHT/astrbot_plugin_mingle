@@ -175,7 +175,9 @@
 - Register `/mingle` through AstrBot's native command_group with group, debug
   and barrier subcommands. Keep the group and all management handlers
   administrator-only. Use the framework's command parsing and help rendering;
-  do not patch the framework command-group help renderer.
+  do not patch the framework command-group help renderer. Put permission
+  decorators above subcommand decorators so native registration creates the
+  handler with its sub_command metadata before attaching permissions.
 - `/mingle group on|off` is restricted to AstrBot administrators through its
   registered handler. Reject private-chat use.
   Enable stores a platform-scoped group UMO; match that group UMO even when
