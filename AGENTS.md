@@ -173,7 +173,7 @@
   scheduling them. Recognized commands bypass this gate. Disabling the plugin
   restores native framework behavior.
 - Register `/mingle` through AstrBot's native command_group with group, debug
-  and boundary subcommands. Keep the group and all management handlers
+  and barrier subcommands. Keep the group and all management handlers
   administrator-only. Use the framework's command parsing and help rendering;
   do not patch the framework command-group help renderer.
 - `/mingle group on|off` is restricted to AstrBot administrators through its
@@ -184,9 +184,12 @@
   Save the plugin config asynchronously under a lock before updating runtime
   settings. On failure restore the in-memory config. Waiting events recheck
   the allowlist before requesting an Agent; active turns are not interrupted.
-- `/mingle boundary set|where|clear` is administrator-only and group-only. Keep
-  one persistent boundary per platform-scoped group in Mingle storage; setting
-  it again replaces the previous boundary. Filter Mingle's Agent prompt history,
+- `/mingle barrier set|find|clear` is administrator-only and group-only.
+  `find` shows the current session’s nearest retained message on either side,
+  each prefixed by its timestamp in the session timezone (UTC fallback), with
+  text limited to 25 characters including the ellipsis, separated by `--- barrier ---`; missing sides
+  use a placeholder. Keep one persistent boundary per platform-scoped group
+  in Mingle storage; setting it again replaces the previous boundary. Filter Mingle's Agent prompt history,
   history tool and image tool to records after it, including isolated member
   sessions. Clearing restores access to retained records. Do not change AstrBot's
   conversation history or the judgment-model history.

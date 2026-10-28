@@ -139,6 +139,48 @@ class ChatHistory:
                 row = await cursor.fetchone()
             return (row[0], row[1]) if row else None
 
+    async def boundary_preview(
+        self, group: str, session: str
+    ) -> tuple[dict | None, dict | None] | None:
+        """Read bounded text immediately around a group's boundary in one session.
+
+        Args:
+            group: Platform-scoped group owning the boundary.
+            session: Current full UMO; other member sessions remain isolated.
+
+        Returns:
+            Before and after text/timestamp records (None for missing sides), or
+            None when no boundary is set.
+        """
+        async with self.lock:
+            async with self.db.execute(
+                "SELECT record_id FROM boundaries WHERE group_session=?", (group,)
+            ) as cursor:
+                boundary = await cursor.fetchone()
+            if boundary is None:
+                return None
+            snippets = []
+            for comparison, ordering in (("<=", "DESC"), (">", "ASC")):
+                async with self.db.execute(
+                    f"SELECT substr(text, 1, 26), timestamp FROM messages WHERE session=? "
+                    f"AND id{comparison}? ORDER BY id {ordering} LIMIT 1",
+                    (session, boundary[0]),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    snippets.append(None)
+                else:
+                    text = row[0].replace("\r", " ").replace("\n", " ")
+                    snippets.append(
+                        {
+                            "text": text[:24] + "…"
+                            if len(text) > 25
+                            else text or "（非文本消息）",
+                            "timestamp": row[1],
+                        }
+                    )
+            return snippets[0], snippets[1]
+
     async def clear_boundary(self, group: str) -> bool:
         """Remove a group boundary without deleting chat records."""
         async with self.lock:

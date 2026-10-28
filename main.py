@@ -4,7 +4,6 @@ import re
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import replace
-from datetime import datetime, timezone
 from sys import maxsize
 
 from astrbot.api import AstrBotConfig
@@ -81,14 +80,14 @@ class MinglePlugin(Star):
     def mingle(self):
         """Manage Mingle group access, debugging and history boundaries."""
 
-    @mingle.command("boundary")
+    @mingle.command("barrier")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def manage_boundary(
+    async def manage_barrier(
         self, event: AstrMessageEvent, action: str
     ) -> AsyncGenerator[MessageEventResult, None]:
         """Manage the current group's persistent Mingle history visibility boundary."""
-        if action not in {"set", "where", "clear"}:
-            yield event.plain_result("用法：/mingle boundary set|where|clear")
+        if action not in {"set", "find", "clear"}:
+            yield event.plain_result("用法：/mingle barrier set|find|clear")
             return
         group = boundary_group(event)
         if group is None:
@@ -107,21 +106,30 @@ class MinglePlugin(Star):
                     "已清除群聊记录边界。" if removed else "当前群聊未设置记录边界。"
                 )
             else:
-                boundary = await self.history.get_boundary(group)
-                if boundary is None:
+                preview = await self.history.boundary_preview(
+                    group, event.unified_msg_origin
+                )
+                if preview is None:
                     message = "当前群聊未设置记录边界。"
                 else:
-                    record_id, set_at = boundary
-                    timestamp = datetime.fromtimestamp(set_at, timezone.utc).isoformat(
-                        timespec="seconds"
-                    )
-                    message = (
-                        f"当前边界：记录 ID {record_id} 之后；设置时间 {timestamp}。"
-                    )
+                    timezone_name = self.context.get_config(
+                        umo=event.unified_msg_origin
+                    ).get("timezone")
+                    lines = []
+                    for record in preview:
+                        if record is None:
+                            lines.append("（暂无保留的消息）")
+                        else:
+                            formatted = format_prompt_history([record], timezone_name)[
+                                0
+                            ]
+                            timestamp = formatted["timestamp"] or "未知时间"
+                            lines.append(f"[{timestamp}] {formatted['text']}")
+                    message = f"{lines[0]}\n\n--- barrier ---\n\n{lines[1]}"
         except Exception:
             self.logger.exception("Failed to manage history boundary for %s", group)
             message = "操作群聊记录边界失败，请查看日志。"
-        yield event.plain_result(message)
+        yield event.plain_result(message).use_markdown(False)
 
     @mingle.command("group")
     @filter.permission_type(filter.PermissionType.ADMIN)

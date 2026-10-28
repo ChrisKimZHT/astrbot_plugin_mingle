@@ -500,9 +500,7 @@ async def test_unload_cancels_waiting_handlers_before_database_close(plugin):
 async def test_group_boundary_filters_agent_history_and_survives_reopen(plugin):
     old = make_event("old")
     old_id = await plugin.history.record(old, old.get_messages())
-    assert (
-        "已设置" in (await anext(plugin.manage_boundary(old, "set"))).get_plain_text()
-    )
+    assert "已设置" in (await anext(plugin.manage_barrier(old, "set"))).get_plain_text()
     new = make_event("new")
     new_id = await plugin.history.record(new, new.get_messages())
     new.set_extra("mingle_managed", True)
@@ -519,15 +517,15 @@ async def test_group_boundary_filters_agent_history_and_survives_reopen(plugin):
     )
     await plugin.history.close()
     await plugin.history.initialize()
-    assert (
-        "记录 ID"
-        in (await anext(plugin.manage_boundary(new, "where"))).get_plain_text()
-    )
+    result = (await anext(plugin.manage_barrier(new, "find"))).get_plain_text()
+    before, after = result.split("\n\n--- barrier ---\n\n")
+    assert before.endswith("] message old")
+    assert after.endswith("] message new")
     assert [
         item["id"] for item in json.loads(await plugin.chat_history(new))["messages"]
     ] == [new_id]
     assert (
-        "已清除" in (await anext(plugin.manage_boundary(new, "clear"))).get_plain_text()
+        "已清除" in (await anext(plugin.manage_barrier(new, "clear"))).get_plain_text()
     )
     assert [
         item["id"] for item in json.loads(await plugin.chat_history(new))["messages"]
@@ -535,10 +533,47 @@ async def test_group_boundary_filters_agent_history_and_survives_reopen(plugin):
 
 
 @pytest.mark.asyncio
+async def test_barrier_preview_is_bounded_and_session_scoped(plugin):
+    event = make_event("before")
+    assert (
+        "未设置" in (await anext(plugin.manage_barrier(event, "find"))).get_plain_text()
+    )
+    plugin.context.get_config = lambda **kwargs: {"timezone": "Asia/Shanghai"}
+    event.message_obj.timestamp = 0
+    await plugin.history.record(event, [Plain("a" * 150)])
+    await anext(plugin.manage_barrier(event, "set"))
+    other = make_event("other", private=True)
+    await plugin.history.record(other, [Plain("private content")])
+    result = (await anext(plugin.manage_barrier(event, "find"))).get_plain_text()
+    assert (
+        result
+        == "[1970-01-01 08:00:00+08:00] "
+        + "a" * 24
+        + "…\n\n--- barrier ---\n\n（暂无保留的消息）"
+    )
+    await plugin.history.record(make_event("after"), [Plain("first\nsecond")])
+    await plugin.history.record(make_event("later"), [Plain("later message")])
+    result = await anext(plugin.manage_barrier(event, "find"))
+    assert (
+        result.get_plain_text()
+        .split("\n\n--- barrier ---\n\n")[1]
+        .endswith("] first second")
+    )
+    assert result.use_markdown_ is False
+    await plugin.history.db.execute(
+        "DELETE FROM messages WHERE session=?", (event.unified_msg_origin,)
+    )
+    await plugin.history.db.commit()
+    assert await plugin.history.boundary_preview(
+        "p:GroupMessage:group", event.unified_msg_origin
+    ) == (None, None)
+
+
+@pytest.mark.asyncio
 async def test_boundary_filters_agent_prompt_without_filtering_judge_history(plugin):
     old = make_event("old")
     old_id = await plugin.history.record(old, old.get_messages())
-    await anext(plugin.manage_boundary(old, "set"))
+    await anext(plugin.manage_barrier(old, "set"))
     event = make_event("new")
     event.is_at_or_wake_command = True
     handler = plugin.on_message(event)
@@ -557,15 +592,15 @@ async def test_boundary_filters_agent_prompt_without_filtering_judge_history(plu
 async def test_group_boundary_overwrite_and_private_rejection(plugin):
     event = make_event("one")
     await plugin.history.record(event, event.get_messages())
-    await anext(plugin.manage_boundary(event, "set"))
+    await anext(plugin.manage_barrier(event, "set"))
     new = make_event("two")
     new_id = await plugin.history.record(new, new.get_messages())
-    await anext(plugin.manage_boundary(new, "set"))
+    await anext(plugin.manage_barrier(new, "set"))
     assert (await plugin.history.get_boundary("p:GroupMessage:group"))[0] == new_id
     private = make_event(private=True)
     assert (
         "群聊"
-        in (await anext(plugin.manage_boundary(private, "clear"))).get_plain_text()
+        in (await anext(plugin.manage_barrier(private, "clear"))).get_plain_text()
     )
     assert await plugin.history.get_boundary("p:GroupMessage:group") is not None
 
@@ -639,7 +674,7 @@ def test_management_commands_use_native_group_and_admin_permissions():
     assert {item.command_name for item in group.sub_command_filters} == {
         "group",
         "debug",
-        "boundary",
+        "barrier",
     }
     permission = next(
         item for item in root.event_filters if isinstance(item, PermissionTypeFilter)
@@ -651,7 +686,7 @@ def test_management_commands_use_native_group_and_admin_permissions():
     event.message_str = "mingle"
     with pytest.raises(ValueError) as error:
         group.filter(event, {})
-    for name in ("group", "debug", "boundary"):
+    for name in ("group", "debug", "barrier"):
         assert name in str(error.value)
     for command in group.sub_command_filters:
         handler = command.get_handler_md()
@@ -834,7 +869,7 @@ async def test_history_tool_returns_stored_records(plugin):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("subcommand", ["group", "debug", "boundary"])
+@pytest.mark.parametrize("subcommand", ["group", "debug", "barrier"])
 async def test_management_invalid_action_does_not_change_settings(plugin, subcommand):
     original = plugin.settings
     results = [
