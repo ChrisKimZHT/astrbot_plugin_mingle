@@ -2,7 +2,7 @@ import json
 
 from astrbot.api.event import AstrMessageEvent
 
-from ..history import ChatHistory
+from ..history import ChatHistory, boundary_group
 
 
 async def chat_history(
@@ -34,7 +34,12 @@ async def chat_history(
     if limit < 1 or limit > 100 or before_id < 0 or after_id < 0:
         return json.dumps({"error": "Invalid limit or cursor"})
     records = await history.get(
-        event.unified_msg_origin, limit, before_id, after_id, keyword
+        event.unified_msg_origin,
+        limit,
+        before_id,
+        after_id,
+        keyword,
+        boundary=boundary_group(event),
     )
     return json.dumps(
         {

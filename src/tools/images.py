@@ -5,7 +5,7 @@ import logging
 from astrbot.api.event import AstrMessageEvent
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from ..history import ChatHistory
+from ..history import ChatHistory, boundary_group
 from ..images import prepare_image
 
 
@@ -34,7 +34,10 @@ async def view_image(
     image = None
     if available and event.get_extra("mingle_managed", False):
         image = await history.read_image(
-            event.unified_msg_origin, record_id, image_index
+            event.unified_msg_origin,
+            record_id,
+            image_index,
+            boundary=boundary_group(event),
         )
     if image is None:
         return CallToolResult(

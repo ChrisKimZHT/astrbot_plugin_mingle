@@ -15,10 +15,18 @@ from astrbot.core.message.components import (
     Plain,
     Reply,
 )
+from astrbot.core.platform.message_type import MessageType
 from astrbot.core.utils.media_utils import detect_image_mime_type_async
 
 from .redaction import redact_text
 from .settings import Settings
+
+
+def boundary_group(event: AstrMessageEvent) -> str | None:
+    """Return the platform-scoped group identity for a group event."""
+    if event.is_private_chat() or not event.get_group_id():
+        return None
+    return f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{event.get_group_id()}"
 
 
 def _copy_image(path: Path, directory: Path, max_bytes: int) -> tuple[str, int]:
@@ -96,9 +104,51 @@ class ChatHistory:
                 size INTEGER NOT NULL,
                 last_seen REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS boundaries (
+                group_session TEXT PRIMARY KEY,
+                record_id INTEGER NOT NULL,
+                set_at REAL NOT NULL
+            );
             PRAGMA user_version=1;
         """)
         await self.db.commit()
+
+    async def set_boundary(self, group: str) -> tuple[int, float]:
+        """Set a group boundary after all records already assigned an ID."""
+        async with self.lock:
+            async with self.db.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name='messages'"
+            ) as cursor:
+                row = await cursor.fetchone()
+            record_id = row[0] if row else 0
+            set_at = time.time()
+            await self.db.execute(
+                "INSERT OR REPLACE INTO boundaries VALUES (?, ?, ?)",
+                (group, record_id, set_at),
+            )
+            await self.db.commit()
+            return record_id, set_at
+
+    async def get_boundary(self, group: str) -> tuple[int, float] | None:
+        """Read the persistent boundary for a platform-scoped group."""
+        async with self.lock:
+            async with self.db.execute(
+                "SELECT record_id, set_at FROM boundaries WHERE group_session=?",
+                (group,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            return (row[0], row[1]) if row else None
+
+    async def clear_boundary(self, group: str) -> bool:
+        """Remove a group boundary without deleting chat records."""
+        async with self.lock:
+            cursor = await self.db.execute(
+                "DELETE FROM boundaries WHERE group_session=?", (group,)
+            )
+            removed = cursor.rowcount > 0
+            await cursor.close()
+            await self.db.commit()
+            return removed
 
     async def record(
         self,
@@ -219,6 +269,7 @@ class ChatHistory:
         before_id: int = 0,
         after_id: int = 0,
         keyword: str = "",
+        boundary: str | None = None,
     ) -> list[dict]:
         """Query chronological records using stable, session-scoped cursors.
 
@@ -228,6 +279,7 @@ class ChatHistory:
             before_id: Exclusive upper record bound, or zero.
             after_id: Exclusive lower record bound, or zero.
             keyword: Optional literal text search.
+            boundary: Group identity whose visibility boundary applies, if any.
 
         Returns:
             Chronological normalized messages with image availability.
@@ -235,6 +287,9 @@ class ChatHistory:
         limit = max(1, min(100, int(limit)))
         query = "SELECT * FROM messages WHERE session=?"
         values = [session]
+        if boundary:
+            query += " AND id>COALESCE((SELECT record_id FROM boundaries WHERE group_session=?), 0)"
+            values.append(boundary)
         if before_id:
             query += " AND id<?"
             values.append(int(before_id))
@@ -275,7 +330,11 @@ class ChatHistory:
         return records
 
     async def read_image(
-        self, session: str, record_id: int, image_index: int
+        self,
+        session: str,
+        record_id: int,
+        image_index: int,
+        boundary: str | None = None,
     ) -> tuple[bytes, str] | None:
         """Read a cached image only through a message in the authorized session.
 
@@ -283,6 +342,7 @@ class ChatHistory:
             session: Current session; models cannot override it.
             record_id: Message record that references the image.
             image_index: Zero-based image index within that record.
+            boundary: Group identity whose visibility boundary applies, if any.
 
         Returns:
             Image bytes and MIME type, or None if unavailable or unauthorized.
@@ -291,8 +351,9 @@ class ChatHistory:
             return None
         async with self.image_lock, self.lock:
             async with self.db.execute(
-                "SELECT images FROM messages WHERE session=? AND id=?",
-                (session, record_id),
+                "SELECT images FROM messages WHERE session=? AND id=? AND "
+                "id>COALESCE((SELECT record_id FROM boundaries WHERE group_session=?), 0)",
+                (session, record_id, boundary),
             ) as cursor:
                 row = await cursor.fetchone()
             if row is None:

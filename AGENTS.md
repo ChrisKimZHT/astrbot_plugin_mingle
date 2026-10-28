@@ -169,6 +169,12 @@
   Save the plugin config asynchronously under a lock before updating runtime
   settings. On failure restore the in-memory config. Waiting events recheck
   the allowlist before requesting an Agent; active turns are not interrupted.
+- `/mingle boundary set|where|clear` is administrator-only and group-only. Keep
+  one persistent boundary per platform-scoped group in Mingle storage; setting
+  it again replaces the previous boundary. Filter Mingle's Agent prompt history,
+  history tool and image tool to records after it, including isolated member
+  sessions. Clearing restores access to retained records. Do not change AstrBot's
+  conversation history or the judgment-model history.
 - Private messages are enabled by default and use the same scheduler. WebChat
   remains on its native flow. When idle, private and explicit wake/mention
   events bypass judgment and cooldown. While busy, evaluate them for control

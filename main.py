@@ -3,6 +3,7 @@ import json
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import replace
+from datetime import datetime, timezone
 from sys import maxsize
 
 from astrbot.api import AstrBotConfig
@@ -19,7 +20,7 @@ from mcp.types import CallToolResult
 
 from .src.debug import DebugDumper
 from .src.decision import ReplyJudge
-from .src.history import ChatHistory
+from .src.history import ChatHistory, boundary_group
 from .src.scheduler import ChatScheduler
 from .src.settings import Settings
 from .src.tools import history as history_tools
@@ -87,22 +88,64 @@ class MinglePlugin(Star):
             Management results or plain-text command help.
         """
         parts = args.split()
-        if (
-            len(parts) != 2
-            or parts[0] not in {"group", "debug"}
-            or parts[1] not in {"on", "off"}
+        if len(parts) != 2 or not (
+            (parts[0] in {"group", "debug"} and parts[1] in {"on", "off"})
+            or (parts[0] == "boundary" and parts[1] in {"set", "where", "clear"})
         ):
             yield event.plain_result(
                 "mingle\n"
                 "├── group on|off\n"
                 "│\t开启或关闭当前群聊\n"
-                "└── debug on|off\n"
-                "\t开启或关闭当前会话调试"
+                "├── debug on|off\n"
+                "│\t开启或关闭当前会话调试\n"
+                "└── boundary set|where|clear\n"
+                "\t设置、查看或清除当前群聊记录边界"
             ).use_markdown(False)
             return
-        handler = self.manage_group if parts[0] == "group" else self.manage_debug
+        handler = {
+            "group": self.manage_group,
+            "debug": self.manage_debug,
+            "boundary": self.manage_boundary,
+        }[parts[0]]
         async for result in handler(event, parts[1]):
             yield result
+
+    async def manage_boundary(
+        self, event: AstrMessageEvent, action: str
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """Manage the current group's persistent Mingle history visibility boundary."""
+        group = boundary_group(event)
+        if group is None:
+            yield event.plain_result("请在需要管理的群聊中使用此命令。")
+            return
+        if not self.available:
+            yield event.plain_result("Mingle 存储尚未就绪。")
+            return
+        try:
+            if action == "set":
+                record_id, set_at = await self.history.set_boundary(group)
+                message = f"已设置群聊记录边界：记录 ID {record_id} 之后的消息可见。"
+            elif action == "clear":
+                removed = await self.history.clear_boundary(group)
+                message = (
+                    "已清除群聊记录边界。" if removed else "当前群聊未设置记录边界。"
+                )
+            else:
+                boundary = await self.history.get_boundary(group)
+                if boundary is None:
+                    message = "当前群聊未设置记录边界。"
+                else:
+                    record_id, set_at = boundary
+                    timestamp = datetime.fromtimestamp(set_at, timezone.utc).isoformat(
+                        timespec="seconds"
+                    )
+                    message = (
+                        f"当前边界：记录 ID {record_id} 之后；设置时间 {timestamp}。"
+                    )
+        except Exception:
+            self.logger.exception("Failed to manage history boundary for %s", group)
+            message = "操作群聊记录边界失败，请查看日志。"
+        yield event.plain_result(message)
 
     async def manage_group(
         self, event: AstrMessageEvent, state: str
@@ -337,6 +380,7 @@ class MinglePlugin(Star):
                 event.unified_msg_origin,
                 limit=self.settings.recent_messages,
                 before_id=max(batch_ids) + 1,
+                boundary=boundary_group(event),
             )
             # New arrivals remain queryable without starting a concurrent Agent.
             prompt = (

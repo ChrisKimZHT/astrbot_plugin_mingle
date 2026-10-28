@@ -422,6 +422,80 @@ async def test_unload_cancels_waiting_handlers_before_database_close(plugin):
 
 
 @pytest.mark.asyncio
+async def test_group_boundary_filters_agent_history_and_survives_reopen(plugin):
+    old = make_event("old")
+    old_id = await plugin.history.record(old, old.get_messages())
+    assert (
+        "已设置" in (await anext(plugin.mingle(old, "boundary set"))).get_plain_text()
+    )
+    new = make_event("new")
+    new_id = await plugin.history.record(new, new.get_messages())
+    new.set_extra("mingle_managed", True)
+    result = json.loads(await plugin.chat_history(new))
+    assert [item["id"] for item in result["messages"]] == [new_id]
+    assert (
+        json.loads(await plugin.chat_history(new, before_id=new_id))["messages"] == []
+    )
+    assert (
+        await plugin.history.read_image(
+            new.unified_msg_origin, old_id, 0, "p:GroupMessage:group"
+        )
+        is None
+    )
+    await plugin.history.close()
+    await plugin.history.initialize()
+    assert (
+        "记录 ID"
+        in (await anext(plugin.mingle(new, "boundary where"))).get_plain_text()
+    )
+    assert [
+        item["id"] for item in json.loads(await plugin.chat_history(new))["messages"]
+    ] == [new_id]
+    assert (
+        "已清除" in (await anext(plugin.mingle(new, "boundary clear"))).get_plain_text()
+    )
+    assert [
+        item["id"] for item in json.loads(await plugin.chat_history(new))["messages"]
+    ] == [old_id, new_id]
+
+
+@pytest.mark.asyncio
+async def test_boundary_filters_agent_prompt_without_filtering_judge_history(plugin):
+    old = make_event("old")
+    old_id = await plugin.history.record(old, old.get_messages())
+    await anext(plugin.mingle(old, "boundary set"))
+    event = make_event("new")
+    event.is_at_or_wake_command = True
+    handler = plugin.on_message(event)
+    try:
+        request = await asyncio.wait_for(anext(handler), 1)
+        assert "message old" not in request.prompt
+        assert "message new" in request.prompt
+        assert old_id in [
+            item["id"] for item in await plugin.history.get(event.unified_msg_origin)
+        ]
+    finally:
+        await handler.aclose()
+
+
+@pytest.mark.asyncio
+async def test_group_boundary_overwrite_and_private_rejection(plugin):
+    event = make_event("one")
+    await plugin.history.record(event, event.get_messages())
+    await anext(plugin.mingle(event, "boundary set"))
+    new = make_event("two")
+    new_id = await plugin.history.record(new, new.get_messages())
+    await anext(plugin.mingle(new, "boundary set"))
+    assert (await plugin.history.get_boundary("p:GroupMessage:group"))[0] == new_id
+    private = make_event(private=True)
+    assert (
+        "群聊"
+        in (await anext(plugin.mingle(private, "boundary clear"))).get_plain_text()
+    )
+    assert await plugin.history.get_boundary("p:GroupMessage:group") is not None
+
+
+@pytest.mark.asyncio
 async def test_group_management_persists_and_updates_all_runtime_settings(plugin):
     event = make_event()
     enabled = [value async for value in plugin.manage_group(event, "on")]
@@ -668,6 +742,8 @@ async def test_history_tool_returns_stored_records(plugin):
         "",
         "group",
         "debug",
+        "boundary",
+        "boundary unknown",
         "unknown",
         "group on extra",
         "group unknown",
@@ -702,8 +778,10 @@ async def test_management_help_uses_tree_format_without_changing_settings(plugin
         "mingle\n"
         "├── group on|off\n"
         "│\t开启或关闭当前群聊\n"
-        "└── debug on|off\n"
-        "\t开启或关闭当前会话调试"
+        "├── debug on|off\n"
+        "│\t开启或关闭当前会话调试\n"
+        "└── boundary set|where|clear\n"
+        "\t设置、查看或清除当前群聊记录边界"
     )
     assert results[0].use_markdown_ is False
     assert plugin.settings is original
