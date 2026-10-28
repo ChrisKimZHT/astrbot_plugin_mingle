@@ -385,9 +385,7 @@ class MinglePlugin(Star):
             )
             # New arrivals remain queryable without starting a concurrent Agent.
             prompt = (
-                self.settings.generator_prompt
-                + self.settings.generator_prompt_append
-                + f"\n\nNew batch record IDs: {batch_ids}. Snapshot ends at record {max(batch_ids)}.\n"
+                f"New batch record IDs: {batch_ids}. Snapshot ends at record {max(batch_ids)}.\n"
                 + json.dumps(recent, ensure_ascii=False)
             )
             if event.get_extra("mingle_resume_after_rerun", False):
@@ -453,6 +451,21 @@ class MinglePlugin(Star):
             request.func_tool = ToolSet(
                 [tool for tool in request.func_tool.tools if tool.name not in disabled]
             )
+
+    @filter.on_llm_request(priority=-maxsize + 1)
+    async def append_generator_instructions(
+        self, event: AstrMessageEvent, request: ProviderRequest
+    ) -> None:
+        """Append configured generator instructions to managed system prompts."""
+        if not self.available or not event.get_extra("mingle_managed", False):
+            return
+        instructions = (
+            self.settings.generator_prompt + self.settings.generator_prompt_append
+        )
+        if instructions:
+            request.system_prompt = (
+                (request.system_prompt + "\n\n") if request.system_prompt else ""
+            ) + instructions
 
     @filter.on_llm_request(priority=-maxsize + 1)
     async def clear_history_images(

@@ -102,9 +102,10 @@
 - Generator instructions use generator.generator_prompt and
   generator.generator_prompt_append, concatenated verbatim without trimming,
   interpolation or an implicit separator. Keep the schema default synchronized
-  with DEFAULT_GENERATOR_PROMPT. Append batch metadata and chat JSON afterwards;
-  prepend the fixed continuation notice for reruns. These instructions stay in
-  the user prompt; AstrBot continues resolving the Agent persona normally.
+  with DEFAULT_GENERATOR_PROMPT. Append these instructions to the system prompt
+  through a managed request hook before debug capture, after AstrBot resolves
+  the Agent persona. Keep batch metadata and chat JSON in the user prompt;
+  prepend the fixed continuation notice there for reruns.
 - Generator defaults allow separate current-chat replies through the native
   send_message_to_user tool when multiple members and topics warrant it. Emit
   exactly <finished> only after successful sends; fall back to normal output if

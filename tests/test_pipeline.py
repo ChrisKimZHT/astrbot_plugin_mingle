@@ -154,9 +154,7 @@ async def test_generator_prompt_uses_configured_text_verbatim(
         records = await plugin.history.get(event.unified_msg_origin)
         record_id = records[0]["id"]
         expected = (
-            base
-            + append
-            + f"\n\nNew batch record IDs: [{record_id}]. Snapshot ends at record {record_id}.\n"
+            f"New batch record IDs: [{record_id}]. Snapshot ends at record {record_id}.\n"
             + json.dumps(records, ensure_ascii=False)
         )
         if rerun:
@@ -167,10 +165,43 @@ async def test_generator_prompt_uses_configured_text_verbatim(
                 + expected
             )
         assert request.prompt == expected
+        request.system_prompt = "Persona instructions"
+        await plugin.append_generator_instructions(event, request)
+        assert request.system_prompt == (
+            "Persona instructions" + ("\n\n" + base + append if base + append else "")
+        )
+        assert request.prompt == expected
         assert request.conversation.cid == "conversation"
         assert request.contexts == []
     finally:
         await handler.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("system_prompt", ["", None])
+async def test_generator_instructions_support_empty_system_prompt(
+    plugin, system_prompt
+):
+    event = make_event(private=True)
+    event.set_extra("mingle_managed", True)
+    request = ProviderRequest(prompt="Chat records")
+    request.system_prompt = system_prompt
+    await plugin.append_generator_instructions(event, request)
+    assert request.system_prompt == plugin.settings.generator_prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed,available", [(False, True), (True, False)])
+async def test_generator_instructions_skip_unmanaged_or_disabled(
+    plugin, managed, available
+):
+    event = make_event()
+    event.set_extra("mingle_managed", managed)
+    plugin.available = available
+    request = ProviderRequest(prompt="Native input", system_prompt="Native persona")
+    await plugin.append_generator_instructions(event, request)
+    assert request.system_prompt == "Native persona"
+    assert request.prompt == "Native input"
 
 
 @pytest.mark.asyncio
@@ -1073,6 +1104,9 @@ def test_history_image_cleanup_runs_before_request_debug_capture():
         )
     }
     assert handlers["clear_history_images"].extras_configs.get(
+        "priority", 0
+    ) > handlers["dump_agent_request"].extras_configs.get("priority", 0)
+    assert handlers["append_generator_instructions"].extras_configs.get(
         "priority", 0
     ) > handlers["dump_agent_request"].extras_configs.get("priority", 0)
 
