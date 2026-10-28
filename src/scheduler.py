@@ -5,30 +5,74 @@ from time import monotonic
 
 from astrbot.api.event import AstrMessageEvent
 
-from .decision import ReplyJudge
+from .decision import ReplyDecision, ReplyJudge
 from .history import ChatHistory
 from .settings import Settings
 
 
 @dataclass
 class PendingMessage:
+    """Keep the original handler alive through admission and pipeline completion.
+
+    Only the newest ticket in an admitted batch receives record IDs via ready;
+    the others receive None. The admitted handler sets finished after its entire
+    pipeline unwinds, including framework history saving.
+    """
+
     event: AstrMessageEvent
     record_id: int
     forced: bool
     ready: asyncio.Future[list[int] | None]
+    received_at: float
     finished: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def release(self) -> None:
+        """Release a waiting handler without admitting another Agent turn."""
+        if not self.ready.done():
+            self.ready.set_result(None)
+
+
+def _waiting_messages(messages: list[PendingMessage]) -> list[PendingMessage]:
+    """Release stopped events and retain tickets still awaiting admission.
+
+    Args:
+        messages: Pending or approved tickets to inspect without changing the list.
+
+    Returns:
+        Unresolved tickets whose events have not been stopped.
+    """
+    waiting = []
+    for item in messages:
+        if item.event.is_stopped() or item.event.get_extra(
+            "agent_stop_requested", False
+        ):
+            item.release()
+        if not item.ready.done():
+            waiting.append(item)
+    return waiting
 
 
 @dataclass
 class SessionState:
+    """Shared state for the session's judgment and execution workers.
+
+    Tickets move through pending -> judging -> approved -> active. Judgment owns
+    pending/judging and appends to approved; execution drains approved and owns
+    active/active_ids. A stop decision may discard approved tickets. changed
+    wakes judgment when arrivals or Agent transitions affect its deadline.
+
+    State transitions contain no awaits. After IO, workers must recheck any
+    live state needed to act on a previously captured Agent or batch.
+    """
+
     pending: list[PendingMessage] = field(default_factory=list)
     judging: list[PendingMessage] = field(default_factory=list)
     approved: list[PendingMessage] = field(default_factory=list)
     changed: asyncio.Event = field(default_factory=asyncio.Event)
-    task: asyncio.Task | None = None
+    judgment_task: asyncio.Task | None = None
     execution_task: asyncio.Task | None = None
     active: PendingMessage | None = None
-    last_reply: float = float("-inf")
+    last_agent_finished_at: float = float("-inf")
     resume_after_rerun: bool = False
     active_ids: list[int] = field(default_factory=list)
     finished: dict[int, str] = field(default_factory=dict)
@@ -65,10 +109,14 @@ class ChatScheduler:
             Admission ticket whose ready future contains a batch or None.
         """
         ticket = PendingMessage(
-            event, record_id, forced, asyncio.get_running_loop().create_future()
+            event,
+            record_id,
+            forced,
+            asyncio.get_running_loop().create_future(),
+            monotonic(),
         )
         if self.closed:
-            ticket.ready.set_result(None)
+            ticket.release()
             return ticket
         key = event.unified_msg_origin
         state = self.sessions.setdefault(key, SessionState())
@@ -78,15 +126,14 @@ class ChatScheduler:
             self._finish_records(state, [oldest.record_id], "merged")
             # Keep direct-address intent even when its original event is merged away.
             state.pending[0].forced |= oldest.forced
-            if not oldest.ready.done():
-                oldest.ready.set_result(None)
+            oldest.release()
         state.changed.set()
-        if state.task is None or state.task.done():
-            state.task = asyncio.create_task(self._run(key, state))
+        if state.judgment_task is None or state.judgment_task.done():
+            state.judgment_task = asyncio.create_task(self._judge_pending(key, state))
         return ticket
 
-    async def _run(self, key: str, state: SessionState) -> None:
-        """Judge new batches without waiting for the running Agent to finish.
+    async def _judge_pending(self, key: str, state: SessionState) -> None:
+        """Merge and judge arrivals while execution independently runs the Agent.
 
         Args:
             key: Unified session identifier.
@@ -95,165 +142,233 @@ class ChatScheduler:
         batch: list[PendingMessage] = []
         try:
             while state.pending and not self.closed:
-                deadline = monotonic() + self.settings.max_wait_seconds
-                while not self.closed:
-                    state.changed.clear()
-                    delay = min(
-                        self.settings.debounce_seconds, max(0, deadline - monotonic())
-                    )
-                    try:
-                        await asyncio.wait_for(state.changed.wait(), timeout=delay)
-                    except asyncio.TimeoutError:
-                        break
-                    if monotonic() >= deadline:
-                        break
-                batch, state.pending = state.pending, []
-                for item in batch:
-                    if (
-                        item.event.is_stopped()
-                        or item.event.get_extra("agent_stop_requested", False)
-                    ) and not item.ready.done():
-                        item.ready.set_result(None)
-                batch = [item for item in batch if not item.ready.done()]
+                await self._wait_for_pending(state)
+                batch, state.pending = _waiting_messages(state.pending), []
                 if not batch:
                     continue
-                leader = batch[-1]
                 state.judging = batch
+                leader = batch[-1]
                 forced = any(item.forced for item in batch)
                 records = await self.history.get(
                     key,
                     limit=self.settings.recent_messages,
                     before_id=max(item.record_id for item in batch) + 1,
                 )
+
+                # Snapshot only after IO: the previous Agent may have finished
+                # during the history read, starting a fresh cooldown.
                 active = state.active
                 if active is not None and active.finished.is_set():
                     active = None
-                active_ids = list(state.active_ids) if active is not None else []
-                if active is not None:
-                    missing_ids = set(active_ids) - {item["id"] for item in records}
-                    if missing_ids:
-                        # Keep the active task visible when new arrivals have
-                        # pushed its input outside the recent-history window.
-                        active_records = await asyncio.gather(
-                            *(
-                                self.history.get(
-                                    key,
-                                    limit=1,
-                                    after_id=record_id - 1,
-                                    before_id=record_id + 1,
-                                )
-                                for record_id in missing_ids
-                            )
-                        )
-                        records = sorted(
-                            records
-                            + [
-                                item
-                                for rows in active_records
-                                for item in rows
-                                if item["id"] in missing_ids
-                            ],
-                            key=lambda item: item["id"],
-                        )
-                message_status = {
-                    "finished": [
-                        {"id": record_id, "outcome": outcome}
-                        for record_id, outcome in state.finished.items()
-                    ],
-                    "active": active_ids,
-                    "queued": [
-                        item.record_id
-                        for item in state.approved
-                        if not item.ready.done()
-                    ],
-                    "awaiting_judgment": [
-                        item.record_id
-                        for item in state.pending
-                        if not item.ready.done()
-                    ],
-                    "judging": [item.record_id for item in batch],
-                }
-                allowed = forced
-                if active is not None:
-                    decision = await self.judge.evaluate(
-                        leader.event,
-                        records,
-                        message_status=message_status,
-                        new_message_ids=[item.record_id for item in batch],
-                    )
-                    allowed = forced or decision.should_reply
-                    if decision.action == "stop":
-                        allowed = False
-                    # A slow judgment must never stop a different, newer turn.
-                    if (
-                        decision.action in {"rerun", "stop"}
-                        and state.active is active
-                        and not active.finished.is_set()
-                        and not leader.ready.done()
-                        and not leader.event.is_stopped()
-                        and not leader.event.get_extra("agent_stop_requested", False)
-                    ):
-                        active.event.set_extra("agent_stop_requested", True)
-                        state.resume_after_rerun = decision.action == "rerun"
-                        self.logger.info(
-                            "Mingle requested Agent %s for session %s",
-                            decision.action,
-                            key,
-                        )
-                        if decision.action == "stop":
-                            self._finish_records(
-                                state,
-                                [item.record_id for item in state.approved],
-                                "discarded_by_stop",
-                            )
-                            for item in state.approved:
-                                if not item.ready.done():
-                                    item.ready.set_result(None)
-                            state.approved.clear()
-                elif (
-                    not allowed
-                    and monotonic() - state.last_reply >= self.settings.cooldown_seconds
-                ):
-                    allowed = await self.judge.should_reply(
-                        leader.event,
-                        records,
-                        message_status=message_status,
-                        new_message_ids=[item.record_id for item in batch],
-                    )
+                cooldown_until = (
+                    state.last_agent_finished_at + self.settings.cooldown_seconds
+                )
+                if active is None and not forced and monotonic() < cooldown_until:
+                    state.pending = batch + state.pending
+                    state.judging = []
+                    batch = []
+                    continue
+
+                decision = await self._evaluate_batch(
+                    key, state, batch, records, active
+                )
+                self._apply_control(key, state, leader, active, decision)
+                allowed = (
+                    forced or decision.should_reply
+                ) and decision.action != "stop"
                 if not allowed or self.closed or leader.ready.done():
                     self._finish_records(
                         state, [item.record_id for item in batch], "no_reply"
                     )
                     for item in batch:
-                        if not item.ready.done():
-                            item.ready.set_result(None)
-                    batch = []
-                    state.judging = []
-                    continue
-                state.approved.extend(batch)
+                        item.release()
+                else:
+                    state.approved.extend(batch)
+                    while len(state.approved) > self.settings.max_pending_messages:
+                        oldest = state.approved.pop(0)
+                        self._finish_records(state, [oldest.record_id], "merged")
+                        oldest.release()
+                    if state.execution_task is None or state.execution_task.done():
+                        state.execution_task = asyncio.create_task(
+                            self._execute_approved(key, state)
+                        )
                 state.judging = []
                 batch = []
-                while len(state.approved) > self.settings.max_pending_messages:
-                    oldest = state.approved.pop(0)
-                    self._finish_records(state, [oldest.record_id], "merged")
-                    if not oldest.ready.done():
-                        oldest.ready.set_result(None)
-                if state.execution_task is None or state.execution_task.done():
-                    state.execution_task = asyncio.create_task(
-                        self._execute(key, state)
-                    )
         except asyncio.CancelledError:
             raise
         except Exception:
             self.logger.exception("Chat scheduling failed for session %s", key)
         finally:
             for item in batch + state.pending:
-                if not item.ready.done():
-                    item.ready.set_result(None)
+                item.release()
             state.pending.clear()
             state.judging = []
 
-    async def _execute(self, key: str, state: SessionState) -> None:
+    async def _wait_for_pending(self, state: SessionState) -> None:
+        """Wait until the current arrivals satisfy merge timing and cooldown.
+
+        Recompute from original arrival times on every wakeup. An active Agent
+        or direct-address ticket bypasses cooldown, but never merge timing.
+
+        Args:
+            state: Session whose pending queue remains open to new arrivals.
+        """
+        while state.pending and not self.closed:
+            state.pending = _waiting_messages(state.pending)
+            if not state.pending:
+                return
+            merge_at = min(
+                state.pending[-1].received_at + self.settings.debounce_seconds,
+                state.pending[0].received_at + self.settings.max_wait_seconds,
+            )
+            active = state.active
+            busy = active is not None and not active.finished.is_set()
+            forced = any(item.forced for item in state.pending)
+            ready_at = merge_at
+            if not busy and not forced:
+                ready_at = max(
+                    merge_at,
+                    state.last_agent_finished_at + self.settings.cooldown_seconds,
+                )
+            delay = ready_at - monotonic()
+            if delay <= 0:
+                return
+            # No await between inspecting state and clearing the notification:
+            # arrivals and Agent transitions cannot be lost in that interval.
+            state.changed.clear()
+            try:
+                await asyncio.wait_for(state.changed.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _evaluate_batch(
+        self,
+        key: str,
+        state: SessionState,
+        batch: list[PendingMessage],
+        records: list[dict],
+        active: PendingMessage | None,
+    ) -> ReplyDecision:
+        """Build judgment context and evaluate against a captured active turn.
+
+        This method does not change queue ownership or stop an Agent. The caller
+        must validate the captured active ticket before applying control actions.
+
+        Args:
+            key: Unified session identifier for retained history reads.
+            state: Live queues and bounded completion outcomes.
+            batch: Arrivals being judged, with the newest event as leader.
+            records: Recent history already loaded for this batch.
+            active: Active ticket captured after the initial history read.
+
+        Returns:
+            Reply admission and any requested control action. Idle direct-address
+            batches are admitted without calling the judge.
+        """
+        active_ids = list(state.active_ids) if active is not None else []
+        missing_ids = set(active_ids) - {item["id"] for item in records}
+        if missing_ids:
+            # Preserve active input even when arrivals push it outside the
+            # recent-history window. Keep IDs tied to the captured Agent.
+            active_records = await asyncio.gather(
+                *(
+                    self.history.get(
+                        key,
+                        limit=1,
+                        after_id=record_id - 1,
+                        before_id=record_id + 1,
+                    )
+                    for record_id in missing_ids
+                )
+            )
+            records = sorted(
+                records
+                + [
+                    item
+                    for rows in active_records
+                    for item in rows
+                    if item["id"] in missing_ids
+                ],
+                key=lambda item: item["id"],
+            )
+        message_status = {
+            "finished": [
+                {"id": record_id, "outcome": outcome}
+                for record_id, outcome in state.finished.items()
+            ],
+            "active": active_ids,
+            "queued": [
+                item.record_id for item in state.approved if not item.ready.done()
+            ],
+            "awaiting_judgment": [
+                item.record_id for item in state.pending if not item.ready.done()
+            ],
+            "judging": [item.record_id for item in batch],
+        }
+        leader = batch[-1]
+        if active is not None:
+            return await self.judge.evaluate(
+                leader.event,
+                records,
+                message_status=message_status,
+                new_message_ids=[item.record_id for item in batch],
+            )
+        if any(item.forced for item in batch):
+            return ReplyDecision(True)
+        return ReplyDecision(
+            await self.judge.should_reply(
+                leader.event,
+                records,
+                message_status=message_status,
+                new_message_ids=[item.record_id for item in batch],
+            )
+        )
+
+    def _apply_control(
+        self,
+        key: str,
+        state: SessionState,
+        leader: PendingMessage,
+        active: PendingMessage | None,
+        decision: ReplyDecision,
+    ) -> None:
+        """Apply stop/rerun only while the captured Agent and request remain valid.
+
+        Args:
+            key: Unified session identifier for logging.
+            state: Live active turn and approved queue.
+            leader: Ticket whose event requested judgment.
+            active: Agent ticket captured before awaiting judgment.
+            decision: Validated control action returned by the judge.
+        """
+        if decision.action not in {"rerun", "stop"} or active is None:
+            return
+        # A slow judgment must never stop a different, newer turn. A released
+        # leader (for example, after group off) no longer authorizes control.
+        if state.active is not active or active.finished.is_set():
+            return
+        if (
+            leader.ready.done()
+            or leader.event.is_stopped()
+            or leader.event.get_extra("agent_stop_requested", False)
+        ):
+            return
+        active.event.set_extra("agent_stop_requested", True)
+        state.resume_after_rerun = decision.action == "rerun"
+        self.logger.info(
+            "Mingle requested Agent %s for session %s", decision.action, key
+        )
+        if decision.action == "stop":
+            self._finish_records(
+                state,
+                [item.record_id for item in state.approved],
+                "discarded_by_stop",
+            )
+            for item in state.approved:
+                item.release()
+            state.approved.clear()
+
+    async def _execute_approved(self, key: str, state: SessionState) -> None:
         """Admit approved batches only after the previous pipeline has unwound.
 
         Args:
@@ -263,25 +378,19 @@ class ChatScheduler:
         batch: list[PendingMessage] = []
         try:
             while state.approved and not self.closed:
-                batch, state.approved = state.approved, []
-                for item in batch:
-                    if (
-                        item.event.is_stopped()
-                        or item.event.get_extra("agent_stop_requested", False)
-                    ) and not item.ready.done():
-                        item.ready.set_result(None)
-                batch = [item for item in batch if not item.ready.done()]
+                batch, state.approved = _waiting_messages(state.approved), []
                 if not batch:
                     state.resume_after_rerun = False
                     continue
                 leader = batch[-1]
                 for item in batch[:-1]:
-                    item.ready.set_result(None)
+                    item.release()
                 if state.resume_after_rerun:
                     leader.event.set_extra("mingle_resume_after_rerun", True)
                     state.resume_after_rerun = False
                 state.active = leader
                 state.active_ids = [item.record_id for item in batch]
+                state.changed.set()
                 leader.ready.set_result([item.record_id for item in batch])
                 # The handler sets finished after the framework's history save,
                 # not merely after its final response hook or first send.
@@ -296,17 +405,17 @@ class ChatScheduler:
                 )
                 self._finish_records(state, state.active_ids, outcome)
                 if leader.event.get_extra("mingle_agent_started", False):
-                    state.last_reply = monotonic()
+                    state.last_agent_finished_at = monotonic()
                 state.active = None
                 state.active_ids = []
+                state.changed.set()
         except asyncio.CancelledError:
             raise
         except Exception:
             self.logger.exception("Mingle Agent admission failed for session %s", key)
         finally:
             for item in batch + state.approved:
-                if not item.ready.done():
-                    item.ready.set_result(None)
+                item.release()
             state.approved.clear()
             state.active = None
             state.active_ids = []
@@ -338,11 +447,10 @@ class ChatScheduler:
                 state.active.event.set_extra("agent_stop_requested", True)
                 state.active.event.stop_event()
             for item in state.pending + state.approved:
-                if not item.ready.done():
-                    item.ready.set_result(None)
-            if state.task is not None:
-                state.task.cancel()
-                tasks.append(state.task)
+                item.release()
+            if state.judgment_task is not None:
+                state.judgment_task.cancel()
+                tasks.append(state.judgment_task)
             if state.execution_task is not None:
                 state.execution_task.cancel()
                 tasks.append(state.execution_task)

@@ -54,7 +54,9 @@ async def plugin(tmp_path, monkeypatch):
     )
     instance = object.__new__(MinglePlugin)
     instance.logger = logging.getLogger("mingle.test")
-    instance.settings = Settings(group_sessions=("group",), debounce_seconds=0)
+    instance.settings = Settings(
+        group_sessions=("group",), debounce_seconds=0, cooldown_seconds=0
+    )
     instance.config = AstrBotConfig(
         str(tmp_path / "config.json"),
         default_config={
@@ -638,7 +640,7 @@ async def test_group_off_during_busy_judgment_does_not_stop_active_agent(plugin)
         [value async for value in plugin.manage_group(make_event("command"), "off")]
         release.set()
         await asyncio.wait_for(
-            plugin.scheduler.sessions[first.unified_msg_origin].task, 1
+            plugin.scheduler.sessions[first.unified_msg_origin].judgment_task, 1
         )
         result = await asyncio.gather(second_task, return_exceptions=True)
         assert isinstance(result[0], StopAsyncIteration)

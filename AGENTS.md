@@ -50,13 +50,17 @@
   session. Judgment merges and evaluates new arrivals while one Agent runs;
   approved batches queue for execution after the active handler fully unwinds.
   Bound both pending and approved event queues and the merge wait.
-- Proactive cooldown defaults to zero so normal conversation continues through
-  the judgment model after the two-second merge window. A positive configured
-  cooldown intentionally saves but skips ordinary messages during that period;
-  it does not schedule a retry when the period expires. Private and explicit
-  wake messages bypass cooldown. Busy-session judgment also bypasses cooldown
-  so corrections and stop requests can be detected. Do not reintroduce a long
-  default silence.
+- Default timing is a three-second proactive cooldown, two-second merge debounce,
+  and six-second maximum merge wait. Cooldown starts when an admitted Agent turn
+  actually finishes. Preserve ordinary arrivals in the bounded pending queue
+  during cooldown and judge them once both cooldown and merge timing allow it.
+  Track original arrival times: readiness is max(cooldown expiry,
+  min(last arrival + debounce, first arrival + maximum merge wait)). Do not restart
+  merging at cooldown expiry, replay raw events, or poll without pending input.
+  A declined batch is finished once and does not retry on another cooldown timer.
+  Private/explicit wake batches and busy-session judgment bypass cooldown while
+  keeping normal merge timing. Agent start/end wake the waiting judgment worker
+  so it can recompute eligibility without resetting the merge window.
 - `src/decision.py` calls a judgment provider without tools. An empty provider ID
   follows AstrBot's current session provider; another configured provider may be
   selected in the plugin settings. Invalid decisions and failures mean silence.
