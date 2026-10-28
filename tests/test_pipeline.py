@@ -501,7 +501,7 @@ async def test_group_boundary_filters_agent_history_and_survives_reopen(plugin):
     old = make_event("old")
     old_id = await plugin.history.record(old, old.get_messages())
     assert (
-        "已设置" in (await anext(plugin.mingle(old, "boundary set"))).get_plain_text()
+        "已设置" in (await anext(plugin.manage_boundary(old, "set"))).get_plain_text()
     )
     new = make_event("new")
     new_id = await plugin.history.record(new, new.get_messages())
@@ -521,13 +521,13 @@ async def test_group_boundary_filters_agent_history_and_survives_reopen(plugin):
     await plugin.history.initialize()
     assert (
         "记录 ID"
-        in (await anext(plugin.mingle(new, "boundary where"))).get_plain_text()
+        in (await anext(plugin.manage_boundary(new, "where"))).get_plain_text()
     )
     assert [
         item["id"] for item in json.loads(await plugin.chat_history(new))["messages"]
     ] == [new_id]
     assert (
-        "已清除" in (await anext(plugin.mingle(new, "boundary clear"))).get_plain_text()
+        "已清除" in (await anext(plugin.manage_boundary(new, "clear"))).get_plain_text()
     )
     assert [
         item["id"] for item in json.loads(await plugin.chat_history(new))["messages"]
@@ -538,7 +538,7 @@ async def test_group_boundary_filters_agent_history_and_survives_reopen(plugin):
 async def test_boundary_filters_agent_prompt_without_filtering_judge_history(plugin):
     old = make_event("old")
     old_id = await plugin.history.record(old, old.get_messages())
-    await anext(plugin.mingle(old, "boundary set"))
+    await anext(plugin.manage_boundary(old, "set"))
     event = make_event("new")
     event.is_at_or_wake_command = True
     handler = plugin.on_message(event)
@@ -557,15 +557,15 @@ async def test_boundary_filters_agent_prompt_without_filtering_judge_history(plu
 async def test_group_boundary_overwrite_and_private_rejection(plugin):
     event = make_event("one")
     await plugin.history.record(event, event.get_messages())
-    await anext(plugin.mingle(event, "boundary set"))
+    await anext(plugin.manage_boundary(event, "set"))
     new = make_event("two")
     new_id = await plugin.history.record(new, new.get_messages())
-    await anext(plugin.mingle(new, "boundary set"))
+    await anext(plugin.manage_boundary(new, "set"))
     assert (await plugin.history.get_boundary("p:GroupMessage:group"))[0] == new_id
     private = make_event(private=True)
     assert (
         "群聊"
-        in (await anext(plugin.mingle(private, "boundary clear"))).get_plain_text()
+        in (await anext(plugin.manage_boundary(private, "clear"))).get_plain_text()
     )
     assert await plugin.history.get_boundary("p:GroupMessage:group") is not None
 
@@ -623,18 +623,38 @@ async def test_group_management_save_failure_leaves_runtime_unchanged(
     assert plugin.config["general"]["group_sessions"] == ["group"]
 
 
-def test_management_dispatcher_is_the_only_registered_management_handler():
+def test_management_commands_use_native_group_and_admin_permissions():
+    from astrbot.core.star.filter.command_group import CommandGroupFilter
     from astrbot.core.star.filter.permission import PermissionType, PermissionTypeFilter
     from astrbot.core.star.star_handler import star_handlers_registry
 
     handlers = star_handlers_registry.get_handlers_by_module_name(
         MinglePlugin.__module__
     )
-    assert not any(
-        item.handler_name in {"manage_group", "manage_debug"} for item in handlers
+    root = next(item for item in handlers if item.handler_name == "mingle")
+    group = next(
+        item for item in root.event_filters if isinstance(item, CommandGroupFilter)
     )
-    for name in ("mingle",):
-        handler = next(item for item in handlers if item.handler_name == name)
+    assert group.group_name == "mingle"
+    assert {item.command_name for item in group.sub_command_filters} == {
+        "group",
+        "debug",
+        "boundary",
+    }
+    permission = next(
+        item for item in root.event_filters if isinstance(item, PermissionTypeFilter)
+    )
+    assert permission.permission_type == PermissionType.ADMIN
+    event = make_event()
+    event.role = "admin"
+    event.is_at_or_wake_command = True
+    event.message_str = "mingle"
+    with pytest.raises(ValueError) as error:
+        group.filter(event, {})
+    for name in ("group", "debug", "boundary"):
+        assert name in str(error.value)
+    for command in group.sub_command_filters:
+        handler = command.get_handler_md()
         permission = next(
             item
             for item in handler.event_filters
@@ -645,6 +665,9 @@ def test_management_dispatcher_is_the_only_registered_management_handler():
         assert not permission.filter(event, {})
         event.role = "admin"
         assert permission.filter(event, {})
+        assert command.get_complete_command_names() == [
+            f"mingle {command.command_name}"
+        ]
 
 
 @pytest.mark.asyncio
@@ -811,65 +834,22 @@ async def test_history_tool_returns_stored_records(plugin):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "args",
-    [
-        "",
-        "group",
-        "debug",
-        "boundary",
-        "boundary unknown",
-        "unknown",
-        "group on extra",
-        "group unknown",
-        "debug unknown",
-    ],
-)
-async def test_management_help_uses_tree_format_without_changing_settings(plugin, args):
-    from astrbot.core.star.star_handler import star_handlers_registry
-
-    handler = next(
-        item
-        for item in star_handlers_registry.get_handlers_by_module_name(
-            MinglePlugin.__module__
-        )
-        if item.handler_name == "mingle"
-    )
-    command = next(
-        item for item in handler.event_filters if isinstance(item, CommandFilter)
-    )
-    event = make_event()
-    event.role = "admin"
-    event.is_at_or_wake_command = True
-    event.message_str = f"mingle {args}".strip()
+@pytest.mark.parametrize("subcommand", ["group", "debug", "boundary"])
+async def test_management_invalid_action_does_not_change_settings(plugin, subcommand):
     original = plugin.settings
-    assert command.filter(event, {})
     results = [
         value
-        async for value in plugin.mingle(event, **event.get_extra("parsed_params"))
+        async for value in getattr(plugin, f"manage_{subcommand}")(
+            make_event(), "unknown"
+        )
     ]
-    assert len(results) == 1
-    assert results[0].get_plain_text() == (
-        "mingle\n"
-        "├── group on|off\n"
-        "│\t开启或关闭当前群聊\n"
-        "├── debug on|off\n"
-        "│\t开启或关闭当前会话调试\n"
-        "└── boundary set|where|clear\n"
-        "\t设置、查看或清除当前群聊记录边界"
-    )
-    assert results[0].use_markdown_ is False
+    assert "用法" in results[0].get_plain_text()
     assert plugin.settings is original
-    event.set_extra("activated_handlers", [handler])
-    assert [value async for value in plugin.on_message(event)] == []
-    assert not event.get_extra("mingle_managed")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("subcommand", ["group", "debug"])
-async def test_management_dispatcher_routes_complete_command_arguments(
-    plugin, subcommand
-):
+async def test_management_subcommands_parse_and_bypass_mingle(plugin, subcommand):
     from astrbot.core.star.star_handler import star_handlers_registry
 
     handler = next(
@@ -877,7 +857,7 @@ async def test_management_dispatcher_routes_complete_command_arguments(
         for item in star_handlers_registry.get_handlers_by_module_name(
             MinglePlugin.__module__
         )
-        if item.handler_name == "mingle"
+        if item.handler_name == f"manage_{subcommand}"
     )
     command = next(
         item for item in handler.event_filters if isinstance(item, CommandFilter)
@@ -890,7 +870,9 @@ async def test_management_dispatcher_routes_complete_command_arguments(
         assert command.filter(event, {})
         results = [
             value
-            async for value in plugin.mingle(event, **event.get_extra("parsed_params"))
+            async for value in getattr(plugin, f"manage_{subcommand}")(
+                event, **event.get_extra("parsed_params")
+            )
         ]
         assert len(results) == 1
         sessions = (
@@ -899,6 +881,10 @@ async def test_management_dispatcher_routes_complete_command_arguments(
             else plugin.settings.debug_sessions
         )
         assert (event.unified_msg_origin in sessions) is (state == "on")
+
+        event.set_extra("activated_handlers", [handler])
+        assert [value async for value in plugin.on_message(event)] == []
+        assert not event.get_extra("mingle_managed")
 
 
 @pytest.mark.asyncio

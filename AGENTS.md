@@ -172,14 +172,12 @@
   LLM fallback and stop ordinary handler propagation without recording or
   scheduling them. Recognized commands bypass this gate. Disabling the plugin
   restores native framework behavior.
-- Register one administrator-only `/mingle` command with a GreedyStr argument.
-  Dispatch group/debug actions inside it; their implementation methods are not
-  independently registered handlers. Maintain the plain-text help tree manually,
-  using continuation bars with tabs and a final branch without a trailing bar.
-  Empty, incomplete and unknown commands show this help without changing settings.
-  Do not patch the framework command-group help renderer.
-- `/mingle group on|off` is restricted to AstrBot administrators through the
-  dispatcher. Reject private-chat use.
+- Register `/mingle` through AstrBot's native command_group with group, debug
+  and boundary subcommands. Keep the group and all management handlers
+  administrator-only. Use the framework's command parsing and help rendering;
+  do not patch the framework command-group help renderer.
+- `/mingle group on|off` is restricted to AstrBot administrators through its
+  registered handler. Reject private-chat use.
   Enable stores a platform-scoped group UMO; match that group UMO even when
   AstrBot isolates member conversations. Disable removes the group UMO, current
   event UMO, and legacy bare group ID, preserving unrelated allowlist entries.

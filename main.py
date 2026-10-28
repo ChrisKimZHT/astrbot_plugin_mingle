@@ -14,7 +14,7 @@ from astrbot.core.agent.tool import ToolSet
 from astrbot.core.message.components import Plain
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
-from astrbot.core.star.filter.command import CommandFilter, GreedyStr
+from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 from mcp.types import CallToolResult
@@ -76,47 +76,20 @@ class MinglePlugin(Star):
             except Exception:
                 self.logger.exception("Mingle retention cleanup failed")
 
-    @filter.command("mingle")
+    @filter.command_group("mingle")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def mingle(
-        self, event: AstrMessageEvent, args: GreedyStr
-    ) -> AsyncGenerator[MessageEventResult, None]:
-        """Dispatch management commands or show the plugin-owned help tree.
+    def mingle(self):
+        """Manage Mingle group access, debugging and history boundaries."""
 
-        Args:
-            event: Administrator command defining the current chat.
-            args: All text following the mingle command, including empty input.
-
-        Yields:
-            Management results or plain-text command help.
-        """
-        parts = args.split()
-        if len(parts) != 2 or not (
-            (parts[0] in {"group", "debug"} and parts[1] in {"on", "off"})
-            or (parts[0] == "boundary" and parts[1] in {"set", "where", "clear"})
-        ):
-            yield event.plain_result(
-                "mingle\n"
-                "├── group on|off\n"
-                "│\t开启或关闭当前群聊\n"
-                "├── debug on|off\n"
-                "│\t开启或关闭当前会话调试\n"
-                "└── boundary set|where|clear\n"
-                "\t设置、查看或清除当前群聊记录边界"
-            ).use_markdown(False)
-            return
-        handler = {
-            "group": self.manage_group,
-            "debug": self.manage_debug,
-            "boundary": self.manage_boundary,
-        }[parts[0]]
-        async for result in handler(event, parts[1]):
-            yield result
-
+    @mingle.command("boundary")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def manage_boundary(
         self, event: AstrMessageEvent, action: str
     ) -> AsyncGenerator[MessageEventResult, None]:
         """Manage the current group's persistent Mingle history visibility boundary."""
+        if action not in {"set", "where", "clear"}:
+            yield event.plain_result("用法：/mingle boundary set|where|clear")
+            return
         group = boundary_group(event)
         if group is None:
             yield event.plain_result("请在需要管理的群聊中使用此命令。")
@@ -150,6 +123,8 @@ class MinglePlugin(Star):
             message = "操作群聊记录边界失败，请查看日志。"
         yield event.plain_result(message)
 
+    @mingle.command("group")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def manage_group(
         self, event: AstrMessageEvent, state: str
     ) -> AsyncGenerator[MessageEventResult, None]:
@@ -224,6 +199,8 @@ class MinglePlugin(Star):
                     message += "插件总开关当前关闭，需在配置中启用。"
         yield event.plain_result(message)
 
+    @mingle.command("debug")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def manage_debug(
         self, event: AstrMessageEvent, state: str
     ) -> AsyncGenerator[MessageEventResult, None]:
