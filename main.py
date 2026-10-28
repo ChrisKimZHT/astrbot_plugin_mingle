@@ -263,12 +263,6 @@ class MinglePlugin(Star):
                 or event.get_platform_name() == "webchat"
             ):
                 return
-        elif (
-            event.unified_msg_origin not in self.settings.group_sessions
-            and group_session not in self.settings.group_sessions
-            and event.get_group_id() not in self.settings.group_sessions
-        ):
-            return
         # Matched commands remain owned by their original handlers, including /stop.
         for handler in event.get_extra("activated_handlers", []):
             if any(
@@ -276,6 +270,16 @@ class MinglePlugin(Star):
                 for item in handler.event_filters
             ):
                 return
+        if not event.is_private_chat() and not {
+            event.unified_msg_origin,
+            group_session,
+            event.get_group_id(),
+        }.intersection(self.settings.group_sessions):
+            # Groups outside the allowlist must not reach the native mention
+            # fallback or ordinary message handlers. Commands bypass this gate.
+            event.should_call_llm(True)
+            event.stop_event()
+            return
         config = self.context.get_config(umo=event.unified_msg_origin)
         if not config.get("provider_settings", {}).get("enable", True):
             return

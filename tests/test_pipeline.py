@@ -171,18 +171,64 @@ async def test_generator_prompt_uses_configured_text_verbatim(
 
 
 @pytest.mark.asyncio
-async def test_commands_and_nonconfigured_groups_remain_unmanaged(plugin):
+@pytest.mark.parametrize("configured", [True, False])
+async def test_commands_remain_native_even_outside_group_allowlist(plugin, configured):
+    if not configured:
+        plugin.settings = replace(plugin.settings, group_sessions=())
     event = make_event()
+    event.is_at_or_wake_command = True
     event.set_extra(
         "activated_handlers", [SimpleNamespace(event_filters=[CommandFilter("stop")])]
     )
     assert [result async for result in plugin.on_message(event)] == []
     assert not event.is_stopped()
     assert not event.get_extra("mingle_managed")
-    event = make_event("2")
-    plugin.settings = replace(plugin.settings, group_sessions=())
-    assert [result async for result in plugin.on_message(event)] == []
-    assert not event.is_stopped()
+    assert not event.call_llm
+    assert not plugin.scheduler.sessions
+    assert await plugin.history.get(event.unified_msg_origin) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wake", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_nonconfigured_groups_block_native_fallback_and_ordinary_handlers(
+    plugin, wake, enabled
+):
+    plugin.settings = replace(plugin.settings, enabled=enabled, group_sessions=())
+    ordinary_calls = []
+    agent_calls = []
+
+    class PluginDispatch:
+        async def process(self, event):
+            async for value in call_handler(event, plugin.on_message):
+                yield value
+            if not event.is_stopped():
+                ordinary_calls.append(event)
+
+    class Agent:
+        async def process(self, event):
+            agent_calls.append(event)
+            yield
+
+    process = ProcessStage()
+    process.ctx = SimpleNamespace(
+        astrbot_config={"provider_settings": {"enable": True}}
+    )
+    process.star_request_sub_stage = PluginDispatch()
+    process.agent_sub_stage = Agent()
+    event = make_event()
+    event.is_at_or_wake_command = wake
+    event.set_extra("activated_handlers", [SimpleNamespace(event_filters=[])])
+    async for _ in process.process(event):
+        pass
+    assert event.is_stopped() is enabled
+    assert event.call_llm is enabled
+    assert len(ordinary_calls) == (0 if enabled else 1)
+    assert len(agent_calls) == (1 if not enabled and wake else 0)
+    assert not event.get_extra("mingle_managed")
+    assert not plugin.scheduler.sessions
+    assert await plugin.history.get(event.unified_msg_origin) == []
+    plugin.context.llm_generate.assert_not_awaited()
 
 
 @pytest.mark.asyncio

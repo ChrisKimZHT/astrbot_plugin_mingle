@@ -7,13 +7,13 @@
         "type": "bool",
         "default": true,
         "description": "启用 Mingle",
-        "hint": "统一调度配置范围内的聊天。"
+        "hint": "统一管理普通群聊消息（包括 @）；仅白名单群允许回复。关闭后恢复 AstrBot 原生流程。"
       },
       "group_sessions": {
         "type": "list",
         "default": [],
         "description": "生效群聊",
-        "hint": "填写完整 UMO（推荐）或群 ID；空列表不接管任何群聊。"
+        "hint": "填写允许回复的完整 UMO（推荐）或群 ID；白名单外普通群消息（包括 @）保持静默，空列表禁止所有群聊回复。已识别命令保留原生流程。"
       },
       "private_enabled": {
         "type": "bool",

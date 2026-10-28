@@ -133,6 +133,11 @@
   dump; the snapshot should preserve the plugin-layer call arguments.
 - Group sessions must be explicitly listed. Prefer full UMO identifiers; bare
   group IDs are supported. Empty group configuration enables no group chats.
+  While the plugin is enabled and initialized, suppress ordinary group messages
+  outside this allowlist, including mentions/wake messages: disable the native
+  LLM fallback and stop ordinary handler propagation without recording or
+  scheduling them. Recognized commands bypass this gate. Disabling the plugin
+  restores native framework behavior.
 - Register one administrator-only `/mingle` command with a GreedyStr argument.
   Dispatch group/debug actions inside it; their implementation methods are not
   independently registered handlers. Maintain the plain-text help tree manually,
