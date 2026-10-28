@@ -191,6 +191,15 @@ class ChatScheduler:
                     for item in batch:
                         item.release()
                 else:
+                    if (
+                        decision.should_reply
+                        and decision.action == "wait"
+                        and (active is not None or not forced)
+                    ):
+                        # Freeze the tail once judgment returns. Later arrivals
+                        # still need judgment, including stop/rerun requests.
+                        batch.extend(_waiting_messages(state.pending))
+                        state.pending = []
                     state.approved.extend(batch)
                     while len(state.approved) > self.settings.max_pending_messages:
                         oldest = state.approved.pop(0)

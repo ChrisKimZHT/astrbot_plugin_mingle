@@ -696,3 +696,99 @@ async def test_approved_limit_and_stopped_tickets_do_not_block_remaining_work(
         newest.finished.set()
     finally:
         await scheduler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("busy", [False, True])
+@pytest.mark.parametrize("reply", [False, True])
+async def test_wait_result_folds_only_current_pending_tail(busy, reply):
+    started, release, judged_again = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def evaluate(*args, **kwargs):
+        calls.append(kwargs["new_message_ids"])
+        if len(calls) == 1:
+            started.set()
+            await release.wait()
+            return ReplyDecision(reply, "wait")
+        judged_again.set()
+        return ReplyDecision(False)
+
+    async def should_reply(*args, **kwargs):
+        return (await evaluate(*args, **kwargs)).should_reply
+
+    scheduler = ChatScheduler(
+        Settings(debounce_seconds=0, cooldown_seconds=0),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        SimpleNamespace(evaluate=evaluate, should_reply=should_reply),
+        logging.getLogger(),
+    )
+    try:
+        active = None
+        if busy:
+            active = await scheduler.submit(Event(), 1, True)
+            assert await asyncio.wait_for(active.ready, 1) == [1]
+        first = await scheduler.submit(Event(), 2, False)
+        await asyncio.wait_for(started.wait(), 1)
+        tail = await scheduler.submit(Event(), 3, False)
+        release.set()
+        state = scheduler.sessions["group"]
+        await asyncio.wait_for(state.judgment_task, 1)
+        if reply:
+            assert calls == [[2]]
+            if busy:
+                assert [item.record_id for item in state.approved] == [2, 3]
+                assert not tail.ready.done()
+                assert not active.event.get_extra("agent_stop_requested", False)
+                active.finished.set()
+            assert await asyncio.wait_for(tail.ready, 1) == [2, 3]
+            assert await asyncio.wait_for(first.ready, 1) is None
+            # The cutoff is fixed; a later arrival must get its own judgment.
+            later = await scheduler.submit(Event(), 4, False)
+            await asyncio.wait_for(judged_again.wait(), 1)
+            assert calls == [[2], [4]]
+            assert await asyncio.wait_for(later.ready, 1) is None
+            tail.finished.set()
+        else:
+            assert calls == [[2], [3]]
+            assert await asyncio.wait_for(first.ready, 1) is None
+            assert await asyncio.wait_for(tail.ready, 1) is None
+    finally:
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decision",
+    [ReplyDecision(True, "rerun"), ReplyDecision(False, "stop"), ReplyDecision(False)],
+)
+async def test_control_and_forced_negative_results_do_not_fold_pending(decision):
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def evaluate(*args, **kwargs):
+        calls.append(kwargs["new_message_ids"])
+        if len(calls) == 1:
+            started.set()
+            await release.wait()
+            return decision
+        return ReplyDecision(False)
+
+    scheduler = ChatScheduler(
+        Settings(debounce_seconds=0, cooldown_seconds=0),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        SimpleNamespace(evaluate=evaluate),
+        logging.getLogger(),
+    )
+    try:
+        active = await scheduler.submit(Event(), 1, True)
+        assert await asyncio.wait_for(active.ready, 1) == [1]
+        await scheduler.submit(Event(), 2, True)
+        await asyncio.wait_for(started.wait(), 1)
+        tail = await scheduler.submit(Event(), 3, False)
+        release.set()
+        await asyncio.wait_for(scheduler.sessions["group"].judgment_task, 1)
+        assert calls == [[2], [3]]
+        assert await asyncio.wait_for(tail.ready, 1) is None
+    finally:
+        await scheduler.close()

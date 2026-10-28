@@ -314,3 +314,14 @@ be verified separately with configured credentials; tests do not contact them.
   Mingle snapshot cursor through the current batch. Persist the cursor in the
   normal user prompt so resets and restarts follow conversation history. The
   same setting continues to bound the judgment context window.
+
+- When an actual judgment returns should_reply=true with action=wait, atomically
+  fold the currently pending valid tickets into that approved batch, both idle
+  and busy. Later arrivals still require normal judgment. Declines, forced-only
+  admission after a negative judgment, idle judgment bypass, rerun and stop do
+  not fold pending tickets. Preserve the approved queue bound and wait for the
+  active pipeline to unwind before execution.
+
+- tests/conftest.py assigns a disposable ASTRBOT_ROOT before framework imports
+  in the test process and restores it at teardown. Keep test import side effects
+  out of the plugin checkout and real framework data directories.
