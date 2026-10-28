@@ -308,3 +308,9 @@ ruff check data/plugins/astrbot_plugin_mingle --no-respect-gitignore
 Tests use real local SQLite/files and framework pipeline dispatch, with model
 and platform calls replaced by fakes. Live provider/platform compatibility must
 be verified separately with configured credentials; tests do not contact them.
+
+- Agent prompts attach initial_context_messages (default 30) only for an empty
+  AstrBot conversation; subsequent turns attach records after the latest saved
+  Mingle snapshot cursor through the current batch. Persist the cursor in the
+  normal user prompt so resets and restarts follow conversation history. The
+  same setting continues to bound the judgment context window.

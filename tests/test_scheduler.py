@@ -384,7 +384,7 @@ async def test_busy_judgment_includes_active_messages_outside_recent_window():
         evaluate=AsyncMock(return_value=ReplyDecision(True, "rerun"))
     )
     scheduler = ChatScheduler(
-        Settings(debounce_seconds=0, recent_messages=1),
+        Settings(debounce_seconds=0, initial_context_messages=1),
         SimpleNamespace(get=get),
         judge,
         logging.getLogger(),

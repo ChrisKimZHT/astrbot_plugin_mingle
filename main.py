@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import replace
@@ -378,12 +379,7 @@ class MinglePlugin(Star):
             )
             if conversation is None:
                 raise RuntimeError("The active conversation could not be loaded")
-            recent = await self.history.get(
-                event.unified_msg_origin,
-                limit=self.settings.recent_messages,
-                before_id=max(batch_ids) + 1,
-                boundary=boundary_group(event),
-            )
+            recent = await self._agent_prompt_history(event, conversation, batch_ids)
             # New arrivals remain queryable without starting a concurrent Agent.
             prompt_history = format_prompt_history(
                 recent,
@@ -428,6 +424,59 @@ class MinglePlugin(Star):
             if ticket is not None:
                 ticket.finished.set()
             self.handlers.discard(task)
+
+    async def _agent_prompt_history(self, event, conversation, batch_ids) -> list[dict]:
+        """Load initial context or records added since the saved Agent snapshot.
+
+        The cursor lives in persisted user prompts so conversation resets and
+        plugin restarts follow the same history as the Agent.
+        """
+        saved = json.loads(conversation.history or "[]")
+        cursor = 0
+        for message in saved:
+            if message.get("role") != "user":
+                continue
+            content = message.get("content", "")
+            texts = (
+                [content]
+                if isinstance(content, str)
+                else [
+                    part.get("text", "")
+                    for part in content
+                    if part.get("type") == "text"
+                ]
+                if isinstance(content, list)
+                else []
+            )
+            for text in texts:
+                match = re.search(
+                    r"(?:^|\n\n)New batch record IDs: \[\d+(?:, \d+)*\]\. Snapshot ends at record (\d+)\.\n",
+                    text,
+                )
+                if match:
+                    cursor = max(cursor, int(match.group(1)))
+        if not saved:
+            return await self.history.get(
+                event.unified_msg_origin,
+                limit=self.settings.initial_context_messages,
+                before_id=max(batch_ids) + 1,
+                boundary=boundary_group(event),
+            )
+        # Existing native conversations have no Mingle snapshot; start at this batch.
+        cursor = cursor or min(batch_ids) - 1
+        records = []
+        while True:
+            page = await self.history.get(
+                event.unified_msg_origin,
+                limit=100,
+                after_id=cursor,
+                before_id=max(batch_ids) + 1,
+                boundary=boundary_group(event),
+            )
+            records.extend(page)
+            if len(page) < 100:
+                return records
+            cursor = page[-1]["id"]
 
     @filter.on_llm_request(priority=-maxsize + 2)
     async def apply_toolbox_switches(

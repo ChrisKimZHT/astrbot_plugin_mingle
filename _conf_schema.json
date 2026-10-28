@@ -106,11 +106,11 @@
     "type": "object",
     "description": "聊天记录",
     "items": {
-      "recent_messages": {
+      "initial_context_messages": {
         "type": "int",
         "default": 30,
-        "description": "近期上下文条数",
-        "hint": "最多 100 条；更早及更新内容可通过历史工具查询。"
+        "description": "初始上下文条数",
+        "hint": "新 Agent 对话附带的上下文条数，最多 100 条；后续轮次只附带新增消息。也用作判别器的近期上下文窗口。"
       },
       "retention_days": {
         "type": "int",

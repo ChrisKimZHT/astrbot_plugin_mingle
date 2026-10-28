@@ -159,7 +159,7 @@ class ChatScheduler:
                 forced = any(item.forced for item in batch)
                 records = await self.history.get(
                     key,
-                    limit=self.settings.recent_messages,
+                    limit=self.settings.initial_context_messages,
                     before_id=max(item.record_id for item in batch) + 1,
                 )
 
@@ -462,7 +462,8 @@ class ChatScheduler:
             state.finished[record_id] = outcome
         while (
             len(state.finished)
-            > self.settings.max_pending_messages + self.settings.recent_messages
+            > self.settings.max_pending_messages
+            + self.settings.initial_context_messages
         ):
             state.finished.pop(next(iter(state.finished)))
 

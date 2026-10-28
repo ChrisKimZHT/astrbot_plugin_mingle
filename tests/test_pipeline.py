@@ -1468,3 +1468,42 @@ async def test_native_split_replies_are_recorded_and_finished_marker_stays_in_de
         json.loads(outputs[0].read_text(encoding="utf-8"))["payload"]["completion_text"]
         == "<finished>"
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_context_is_incremental_and_resets_with_conversation(plugin):
+    event = make_event("first", private=True)
+    first_id = await plugin.history.record(event, event.get_messages())
+    conversation = SimpleNamespace(history="[]")
+    initial = await plugin._agent_prompt_history(event, conversation, [first_id])
+    assert [row["id"] for row in initial] == [first_id]
+    conversation.history = json.dumps(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"New batch record IDs: [{first_id}]. Snapshot ends at record {first_id}.\n[]"
+                        ),
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "Previous response"},
+        ]
+    )
+    # More than one query page, including messages not admitted individually.
+    ids = []
+    for index in range(105):
+        arrival = make_event(f"next-{index}", private=True)
+        ids.append(await plugin.history.record(arrival, arrival.get_messages()))
+    incremental = await plugin._agent_prompt_history(event, conversation, [ids[-1]])
+    assert [row["id"] for row in incremental] == ids
+    conversation.history = "[]"
+    plugin.settings = replace(plugin.settings, initial_context_messages=3)
+    reset = await plugin._agent_prompt_history(event, conversation, [ids[-1]])
+    assert [row["id"] for row in reset] == ids[-3:]
+    conversation.history = json.dumps([{"role": "user", "content": "Native chat"}])
+    native = await plugin._agent_prompt_history(event, conversation, [ids[-1]])
+    assert [row["id"] for row in native] == ids[-1:]

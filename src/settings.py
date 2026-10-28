@@ -16,7 +16,7 @@ CONFIG_GROUPS = {
     ),
     "generator": ("generator_prompt", "generator_prompt_append"),
     "history": (
-        "recent_messages",
+        "initial_context_messages",
         "retention_days",
         "max_messages_per_session",
         "redaction_enabled",
@@ -112,7 +112,7 @@ class Settings:
     debounce_seconds: float = 2.0
     max_wait_seconds: float = 6.0
     cooldown_seconds: float = 3.0
-    recent_messages: int = 30
+    initial_context_messages: int = 30
     max_pending_messages: int = 100
     retention_days: int = 30
     max_messages_per_session: int = 10000
@@ -180,7 +180,7 @@ class Settings:
             ):
                 raise ValueError(f"{name} must be between 0 and 86400")
         for name in (
-            "recent_messages",
+            "initial_context_messages",
             "max_pending_messages",
             "retention_days",
             "max_messages_per_session",
@@ -208,6 +208,6 @@ class Settings:
         ):
             if not isinstance(getattr(settings, name), str):
                 raise ValueError(f"{name} must be a string")
-        if settings.recent_messages > 100:
-            raise ValueError("recent_messages must not exceed 100")
+        if settings.initial_context_messages > 100:
+            raise ValueError("initial_context_messages must not exceed 100")
         return settings
