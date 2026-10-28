@@ -21,7 +21,7 @@
 - `src/tools/history.py` and `src/tools/images.py` implement Mingle-required
   function-calling tools. Keep tool names, signatures and model-facing docstrings
   on the registered main.py methods; delegate execution with explicit dependencies.
-  Storage stays in src/history.py and image preprocessing in src/images.py.
+  Storage stays in src/history.py and image preprocessing in src/utils/image_preprocessing.py.
   Use root-level toolbox/ for additional general-purpose model tools; core
   scheduling, decision and storage modules must not depend on that toolbox.
   main.py registers these tools through the normal AstrBot lifecycle.
@@ -247,7 +247,7 @@
 
 - Redact newly recorded message bodies before truncation and SQLite insertion
   when history.redaction_enabled is true (default). Apply the same pure-code
-  rules to user text, quoted text and bot text. Keep rules in src/redaction.py.
+  rules to user text, quoted text and bot text. Keep rules in src/utils/redaction.py.
   Preserve identity, deduplication and reply metadata. Do not mutate original
   events or rewrite existing records. This is text storage redaction, not a
   global model-input or attachment filter; framework history and debug files
@@ -267,7 +267,7 @@
   Repeated content shares one file. Expiration is based on last receipt.
 - Validate image content, limit bytes read, use atomic file replacement, and
   return MCP image content to the Agent through `mingle_view_image`.
-- `src/images.py` prepares model-facing copies with AstrBot's public
+- `src/utils/image_preprocessing.py` prepares model-facing copies with AstrBot's public
   `compress_image` utility: longest edge 1280 pixels and JPEG quality 85.
   Convert GIFs to a static first frame before compression. Preserve original
   cached bytes, report the actual output MIME type, and remove compressor temp

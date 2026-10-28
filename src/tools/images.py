@@ -6,7 +6,7 @@ from astrbot.api.event import AstrMessageEvent
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from ..history import ChatHistory, boundary_group
-from ..images import prepare_image
+from ..utils.image_preprocessing import prepare_image
 
 
 async def view_image(

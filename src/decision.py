@@ -9,8 +9,8 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context
 
 from .debug import DebugDumper
-from .prompt_history import format_prompt_history
 from .settings import Settings
+from .utils.history_formatting import format_prompt_history
 
 
 @dataclass(frozen=True)

@@ -23,9 +23,9 @@ from mingle_tests_plugin.main import MinglePlugin
 from mingle_tests_plugin.src.debug import DebugDumper
 from mingle_tests_plugin.src.decision import ReplyJudge
 from mingle_tests_plugin.src.history import ChatHistory
-from mingle_tests_plugin.src.prompt_history import format_prompt_history
 from mingle_tests_plugin.src.scheduler import ChatScheduler
 from mingle_tests_plugin.src.settings import Settings
+from mingle_tests_plugin.src.utils.history_formatting import format_prompt_history
 
 
 def make_event(number="1", private=False):
@@ -990,7 +990,7 @@ async def test_unchanged_compressor_output_requires_valid_dimensions(
         plugin.history, "read_image", AsyncMock(return_value=(data, "image/png"))
     )
     monkeypatch.setattr(
-        "mingle_tests_plugin.src.images.compress_image",
+        "mingle_tests_plugin.src.utils.image_preprocessing.compress_image",
         AsyncMock(side_effect=lambda source, **kwargs: source),
     )
     result = await plugin.view_image(event, 1)
@@ -1009,7 +1009,7 @@ async def test_unchanged_compressor_output_rejects_corrupt_image(plugin, monkeyp
         plugin.history, "read_image", AsyncMock(return_value=(b"invalid", "image/png"))
     )
     monkeypatch.setattr(
-        "mingle_tests_plugin.src.images.compress_image",
+        "mingle_tests_plugin.src.utils.image_preprocessing.compress_image",
         AsyncMock(side_effect=lambda source, **kwargs: source),
     )
     result = await plugin.view_image(event, 1)

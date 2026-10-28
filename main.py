@@ -21,11 +21,11 @@ from mcp.types import CallToolResult
 from .src.debug import DebugDumper
 from .src.decision import ReplyJudge
 from .src.history import ChatHistory, boundary_group
-from .src.prompt_history import format_prompt_history
 from .src.scheduler import ChatScheduler
 from .src.settings import Settings
 from .src.tools import history as history_tools
 from .src.tools import images as image_tools
+from .src.utils.history_formatting import format_prompt_history
 from .toolbox.calculate import calculate
 from .toolbox.image_generate import generate_image
 from .toolbox.random import draw_random

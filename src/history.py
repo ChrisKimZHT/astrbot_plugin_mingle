@@ -18,8 +18,8 @@ from astrbot.core.message.components import (
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.utils.media_utils import detect_image_mime_type_async
 
-from .redaction import redact_text
 from .settings import Settings
+from .utils.redaction import redact_text
 
 
 def boundary_group(event: AstrMessageEvent) -> str | None:

@@ -1,5 +1,5 @@
 import pytest
-from mingle_tests_plugin.src.redaction import redact_text
+from mingle_tests_plugin.src.utils.redaction import redact_text
 
 
 @pytest.mark.parametrize(
