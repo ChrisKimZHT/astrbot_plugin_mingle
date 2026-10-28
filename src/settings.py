@@ -14,7 +14,12 @@ CONFIG_GROUPS = {
         "judge_prompt_append",
         "judge_timeout",
     ),
-    "history": ("recent_messages", "retention_days", "max_messages_per_session"),
+    "history": (
+        "recent_messages",
+        "retention_days",
+        "max_messages_per_session",
+        "redaction_enabled",
+    ),
     "images": ("image_retention_days", "image_cache_mb", "max_image_mb"),
     "debug": ("debug_sessions",),
     "toolbox": ("toolbox_enabled", "toolbox_time_enabled"),
@@ -65,6 +70,7 @@ class Settings:
     max_pending_messages: int = 100
     retention_days: int = 30
     max_messages_per_session: int = 10000
+    redaction_enabled: bool = True
     image_retention_days: int = 7
     image_cache_mb: int = 512
     max_image_mb: int = 20
@@ -101,6 +107,7 @@ class Settings:
         for name in (
             "enabled",
             "private_enabled",
+            "redaction_enabled",
             "toolbox_enabled",
             "toolbox_time_enabled",
         ):

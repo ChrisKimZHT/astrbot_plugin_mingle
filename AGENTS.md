@@ -184,6 +184,13 @@
 
 ## Storage and attachments
 
+- Redact newly recorded message bodies before truncation and SQLite insertion
+  when history.redaction_enabled is true (default). Apply the same pure-code
+  rules to user text, quoted text and bot text. Keep rules in src/redaction.py.
+  Preserve identity, deduplication and reply metadata. Do not mutate original
+  events or rewrite existing records. This is text storage redaction, not a
+  global model-input or attachment filter; framework history and debug files
+  are outside its scope. Never log matched originals.
 - Do not write to AstrBot's platform message table or alter its retention rules.
 - Records are partitioned by full UMO. Stable platform message IDs plus sender
   identity deduplicate inbound messages within retained history, including after

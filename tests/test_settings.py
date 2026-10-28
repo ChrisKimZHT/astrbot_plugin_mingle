@@ -10,6 +10,7 @@ from mingle_tests_plugin.src.settings import Settings
         {"scheduler": {"max_wait_seconds": 1, "debounce_seconds": 2}},
         {"judge": {"judge_timeout": 0}},
         {"history": {"recent_messages": True}},
+        {"history": {"redaction_enabled": "true"}},
         {"history": {"recent_messages": 101}},
         {"general": {"enabled": "false"}},
         {"general": {"group_sessions": "group"}},

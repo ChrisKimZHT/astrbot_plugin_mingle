@@ -17,6 +17,7 @@ from astrbot.core.message.components import (
 )
 from astrbot.core.utils.media_utils import detect_image_mime_type_async
 
+from .redaction import redact_text
 from .settings import Settings
 
 
@@ -149,7 +150,10 @@ class ChatHistory:
                 )
             else:
                 parts.append(f"[{component.type.value}]")
-        text = " ".join(parts).strip()[:8000]
+        text = " ".join(parts).strip()
+        if self.settings.redaction_enabled:
+            text = redact_text(text)
+        text = text[:8000]
         if not text:
             return None
         sender_id = event.get_self_id() if role == "bot" else event.get_sender_id()

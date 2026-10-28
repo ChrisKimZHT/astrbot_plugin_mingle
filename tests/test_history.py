@@ -34,6 +34,37 @@ async def history(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_redaction_is_stored_before_truncation_and_preserves_identity(history):
+    event = Event()
+    chain = [
+        Plain("联系13800138000"),
+        Reply(id="13800138000", message_str="a@example.com"),
+        Plain("-----BEGIN PRIVATE KEY-----" + "x" * 9000 + "-----END PRIVATE KEY-----"),
+    ]
+    record_id = await history.record(event, chain)
+    assert await history.record(event, chain) is None
+    async with history.db.execute(
+        "SELECT * FROM messages WHERE id=?", (record_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert "a@example.com" not in row["text"]
+    assert "[邮箱]" in row["text"] and "[私钥]" in row["text"]
+    assert "x" * 20 not in row["text"]
+    assert row["reply_to"] == "13800138000"
+    assert row["sender_id"] == "alice"
+    assert chain[0].text == "联系13800138000"
+    assert await history.get(event.unified_msg_origin, keyword="a@example.com") == []
+    assert (await history.get(event.unified_msg_origin))[0]["text"] == row["text"]
+    history.settings = replace(history.settings, redaction_enabled=False)
+    await history.record(Event("2"), [Plain("a@example.com")])
+    history.settings = replace(history.settings, redaction_enabled=True)
+    await history.record(Event("3"), [Plain("a@example.com")], role="bot")
+    records = await history.get(event.unified_msg_origin)
+    assert records[-2]["text"] == "a@example.com"
+    assert records[-1]["text"] == "[邮箱]"
+
+
+@pytest.mark.asyncio
 async def test_deduplication_pagination_and_scope(history):
     ids = []
     for number in range(5):
