@@ -29,6 +29,8 @@ from mingle_tests_plugin.src.settings import Settings
         {"toolbox": {"toolbox_time_enabled": None}},
         {"toolbox": {"toolbox_calculate_enabled": 1}},
         {"toolbox": {"toolbox_random_enabled": "false"}},
+        {"toolbox": {"toolbox_image_generate_enabled": "true"}},
+        {"mingle_generate_image": {"toolbox_image_generate_provider_id": 1}},
     ],
 )
 def test_invalid_settings_fail_at_startup(config):
@@ -56,6 +58,7 @@ def test_schema_defaults_match_runtime_settings(tmp_path):
         "images",
         "debug",
         "toolbox",
+        "mingle_generate_image",
     ]
     assert Settings.from_config(
         {"general": {"group_sessions": ["  group  ", ""]}}
@@ -76,6 +79,9 @@ def test_grouped_settings_load_custom_values():
             "images": {"image_cache_mb": 128, "max_image_mb": 5},
             "debug": {"debug_sessions": ["p:FriendMessage:alice"]},
             "toolbox": {"toolbox_enabled": False, "toolbox_time_enabled": False},
+            "mingle_generate_image": {
+                "toolbox_image_generate_provider_id": "image-provider"
+            },
         }
     )
     assert settings == Settings(
@@ -94,4 +100,5 @@ def test_grouped_settings_load_custom_values():
         debug_sessions=("p:FriendMessage:alice",),
         toolbox_enabled=False,
         toolbox_time_enabled=False,
+        toolbox_image_generate_provider_id="image-provider",
     )

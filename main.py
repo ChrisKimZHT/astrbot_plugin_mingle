@@ -26,6 +26,7 @@ from .src.settings import Settings
 from .src.tools import history as history_tools
 from .src.tools import images as image_tools
 from .toolbox.calculate import calculate
+from .toolbox.image_generate import generate_image
 from .toolbox.random import draw_random
 from .toolbox.time import get_current_time
 
@@ -440,6 +441,7 @@ class MinglePlugin(Star):
             "mingle_get_time": self.settings.toolbox_time_enabled,
             "mingle_calculate": self.settings.toolbox_calculate_enabled,
             "mingle_random": self.settings.toolbox_random_enabled,
+            "mingle_generate_image": self.settings.toolbox_image_generate_enabled,
         }
         disabled = {
             name
@@ -758,6 +760,49 @@ class MinglePlugin(Star):
         ):
             return json.dumps({"error": "The random tool is disabled in Mingle."})
         return draw_random(minimum, maximum, count, choices)
+
+    @filter.llm_tool(name="mingle_generate_image")
+    async def generate_image(
+        self,
+        event: AstrMessageEvent,
+        prompt: str,
+        size: str = "auto",
+        quality: str = "auto",
+    ) -> str:
+        """Generate one image from text and send it directly to the current chat.
+
+        Use when the user requests a new image. This tool sends the image itself;
+        do not send it again. It does not edit existing images. A successful result
+        means the platform send call returned, not a delivery receipt. On failure,
+        explain the error rather than claiming an image was sent or retrying blindly.
+
+        Args:
+            prompt (str): Image description, between 1 and 32000 characters.
+            size (str): auto, 1024x1024, 1536x1024 or 1024x1536; default auto.
+            quality (str): auto, low, medium or high; default auto.
+
+        Returns:
+            JSON with the send result or an explicit error. No image is returned
+            to the model.
+        """
+        if (
+            not self.available
+            or not self.settings.toolbox_enabled
+            or not self.settings.toolbox_image_generate_enabled
+        ):
+            return json.dumps(
+                {"error": "The image generation tool is disabled in Mingle."}
+            )
+        provider_id = self.settings.toolbox_image_generate_provider_id
+        provider = self.context.get_provider_by_id(provider_id) if provider_id else None
+        return await generate_image(
+            event,
+            provider,
+            self.logger,
+            prompt=prompt,
+            size=size,
+            quality=quality,
+        )
 
     async def terminate(self) -> None:
         """Stop plugin work before closing the database connection."""

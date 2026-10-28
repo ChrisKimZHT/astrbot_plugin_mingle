@@ -4,7 +4,7 @@ import logging
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -1228,6 +1228,72 @@ def test_new_tool_schemas_only_expose_model_arguments():
         "choices",
     }
     assert random_tool.parameters["properties"]["choices"]["items"]["type"] == "string"
+    image_tool = llm_tools.get_func("mingle_generate_image")
+    assert set(image_tool.parameters["properties"]) == {"prompt", "size", "quality"}
+    assert all(
+        item["type"] == "string"
+        for item in image_tool.parameters["properties"].values()
+    )
+
+
+@pytest.mark.parametrize("master", [True, False])
+@pytest.mark.parametrize("individual", [True, False])
+async def test_image_tool_switches_and_explicit_provider(
+    plugin, monkeypatch, master, individual
+):
+    from astrbot.core.agent.tool import FunctionTool, ToolSet
+
+    provider = object()
+    lookup = Mock(return_value=provider)
+    plugin.context.get_provider_by_id = lookup
+    generate = AsyncMock(return_value='{"sent": true}')
+    monkeypatch.setattr("mingle_tests_plugin.main.generate_image", generate)
+    plugin.settings = replace(
+        plugin.settings,
+        toolbox_enabled=master,
+        toolbox_image_generate_enabled=individual,
+        toolbox_image_generate_provider_id="images-provider",
+    )
+    names = ["mingle_generate_image", "mingle_get_time", "mingle_view_image", "native"]
+    shared = ToolSet(
+        [FunctionTool(name=name, parameters={}, description="") for name in names]
+    )
+    event = make_event(private=True)
+    request = ProviderRequest(prompt="draw", func_tool=shared)
+    await plugin.apply_toolbox_switches(event, request)
+    actual = {tool.name for tool in request.func_tool.tools}
+    assert ("mingle_generate_image" in actual) is (master and individual)
+    assert ("mingle_get_time" in actual) is master
+    assert {"mingle_view_image", "native"} <= actual
+    assert [tool.name for tool in shared.tools] == names
+    result = json.loads(await plugin.generate_image(event, "a bird"))
+    if master and individual:
+        assert result["sent"] is True
+        lookup.assert_called_once_with("images-provider")
+        generate.assert_awaited_once_with(
+            event,
+            provider,
+            plugin.logger,
+            prompt="a bird",
+            size="auto",
+            quality="auto",
+        )
+    else:
+        assert "error" in result
+        generate.assert_not_awaited()
+        lookup.assert_not_called()
+    plugin.available = False
+    generate.reset_mock()
+    assert "error" in json.loads(await plugin.generate_image(event, "bird"))
+    generate.assert_not_awaited()
+    plugin.available = True
+
+
+async def test_image_tool_missing_selection_does_not_choose_another_provider(plugin):
+    plugin.context.get_provider_by_id = Mock()
+    result = json.loads(await plugin.generate_image(make_event(), "a bird"))
+    assert "Select an image generation provider" in result["error"]
+    plugin.context.get_provider_by_id.assert_not_called()
 
 
 def test_toolbox_switches_run_before_request_debug_capture():

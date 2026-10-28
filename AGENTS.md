@@ -28,7 +28,7 @@
   toolbox/time.py implements mingle_get_time with no model-supplied parameters.
   Resolve the session's AstrBot timezone on each call; missing/invalid zones use
   UTC. Include the date, time, numeric UTC offset, timezone and weekday. The tool
-  is usable outside managed Mingle turns. The final toolbox configuration group
+  is usable outside managed Mingle turns. The toolbox configuration group
   exposes toolbox_enabled (master switch) and toolbox_time_enabled, both true
   by default. All optional tools must have independent switches under this group.
   Filter disabled tools from a request-local ToolSet before debug capture, never
@@ -43,6 +43,18 @@
   unique candidate strings without replacement. Bound result counts and input
   sizes. Register both tools in main.py with independent default-true switches
   toolbox_calculate_enabled and toolbox_random_enabled in the toolbox group.
+- toolbox/image_generate.py implements mingle_generate_image through the standard
+  OpenAI /images/generations endpoint, with one PNG per call. Reuse an explicitly
+  selected AstrBot OpenAI-compatible provider's model name, current key, base URL,
+  proxy, headers and timeout without mutating its client or configuration. Resolve
+  the model name on every call; do not add a separate image model setting.
+  Return configuration errors for missing providers
+  and unsupported Azure endpoints. Validate bounded image data off-thread, send
+  directly to the event's current chat, and return only the send result to the
+  model. A successful send call is not a delivery receipt. Do not automatically
+  retry paid generation or expose credentials/upstream error bodies. Register
+  normally in main.py with the independent default-true switch
+  toolbox_image_generate_enabled under the toolbox master switch.
 - Keep business modules in the `src/` package. The root `main.py` remains the
   AstrBot entry point and uses relative imports from `.src`. Keep tests in the
   root `tests/` directory and import business modules through the `src` package.
@@ -112,7 +124,10 @@
   these settings in AstrBot's configuration UI. Use one level of object groups
   in this order: general (基础设置), scheduler (调度器), judge (判别器),
   generator (生成器), history (聊天记录), images (图片缓存), debug (调试),
-  toolbox (额外工具箱).
+  toolbox (额外工具箱), followed by tool-specific configuration groups named
+  after the actual registered tools. Keep the master and individual enable
+  switches in toolbox; place other tool settings in their own sections. Only
+  mingle_generate_image currently needs such a section.
   CONFIG_GROUPS maps
   grouped configuration to flat immutable runtime fields. Flat legacy settings
   are unsupported; do not add migration or fallback logic for this test version.

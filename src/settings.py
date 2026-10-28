@@ -28,7 +28,9 @@ CONFIG_GROUPS = {
         "toolbox_time_enabled",
         "toolbox_calculate_enabled",
         "toolbox_random_enabled",
+        "toolbox_image_generate_enabled",
     ),
+    "mingle_generate_image": ("toolbox_image_generate_provider_id",),
 }
 
 DEFAULT_JUDGE_PROMPT = (
@@ -122,6 +124,8 @@ class Settings:
     toolbox_time_enabled: bool = True
     toolbox_calculate_enabled: bool = True
     toolbox_random_enabled: bool = True
+    toolbox_image_generate_enabled: bool = True
+    toolbox_image_generate_provider_id: str = ""
 
     @classmethod
     def from_config(cls, config: dict) -> "Settings":
@@ -158,6 +162,7 @@ class Settings:
             "toolbox_time_enabled",
             "toolbox_calculate_enabled",
             "toolbox_random_enabled",
+            "toolbox_image_generate_enabled",
         ):
             if not isinstance(getattr(settings, name), bool):
                 raise ValueError(f"{name} must be a boolean")
@@ -199,6 +204,7 @@ class Settings:
             "judge_prompt_append",
             "generator_prompt",
             "generator_prompt_append",
+            "toolbox_image_generate_provider_id",
         ):
             if not isinstance(getattr(settings, name), str):
                 raise ValueError(f"{name} must be a string")

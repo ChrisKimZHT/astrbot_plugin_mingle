@@ -196,6 +196,25 @@
         "default": true,
         "description": "mingle_random",
         "hint": "支持区间整数、掷骰子和候选项不放回抽取。总开关也必须开启。"
+      },
+      "toolbox_image_generate_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "mingle_generate_image",
+        "hint": "通过标准 OpenAI Images API 生成一张 PNG 并直接发送到当前聊天，向模型仅返回发送结果。总开关也必须开启。"
+      }
+    }
+  },
+  "mingle_generate_image": {
+    "type": "object",
+    "description": "mingle_generate_image",
+    "items": {
+      "toolbox_image_generate_provider_id": {
+        "type": "string",
+        "default": "",
+        "description": "生图接口提供商",
+        "hint": "选择已配置生图模型名称的 OpenAI 兼容提供商，复用其模型名称、接口地址、当前 Key、代理、自定义请求头和超时。不支持 Azure；留空时调用返回配置错误。生图耗时较长时，按需调整 AstrBot 工具调用超时及提供商超时。",
+        "_special": "select_provider"
       }
     }
   }
