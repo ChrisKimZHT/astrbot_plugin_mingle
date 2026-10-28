@@ -452,10 +452,11 @@ async def test_rerun_uses_framework_stop_signal_and_saves_before_replacement(plu
 
 
 @pytest.mark.asyncio
-async def test_completed_responses_are_recorded_once(plugin):
+async def test_sent_responses_are_recorded_once_without_final_output(plugin):
     event = make_event()
     event.set_extra("mingle_turn_id", "turn")
-    response = LLMResponse(role="assistant", completion_text="hello")
+    event.set_extra("_send_message_to_user_current_session_plain_texts", ["hello"])
+    response = LLMResponse(role="assistant", completion_text="Unsent final output")
     await plugin.record_response(event, response)
     await plugin.record_response(event, response)
     rows = await plugin.history.get(event.unified_msg_origin)
@@ -1394,28 +1395,31 @@ def test_toolbox_switches_run_before_request_debug_capture():
     [
         ("<finished>", True, True, True),
         (" \n<finished>\t", True, True, True),
-        ("Answer <finished>", True, True, False),
-        ("<finished> is a marker", True, True, False),
+        ("Answer <finished>", True, True, True),
+        ("<finished> is a marker", True, True, True),
         ("<finished>", False, True, False),
-        ("<finished>", True, False, False),
-        ("Normal reply", True, True, False),
+        ("<finished>", True, False, True),
+        ("Normal reply", True, True, True),
     ],
 )
-async def test_finished_marker_only_suppresses_standalone_managed_llm_text(
-    plugin, text, managed, llm, hidden
+async def test_final_output_is_suppressed_only_for_managed_turns(
+    plugin, text, managed, llm, hidden, caplog
 ):
     event = make_event()
     event.set_extra("mingle_managed", managed)
     response = LLMResponse(role="assistant" if llm else "err", completion_text=text)
-    await plugin.suppress_finished_reply(event, response)
+    await plugin.suppress_final_reply(event, response)
     assert (response.completion_text == "") is hidden
+    assert ("final output was not <finished>" in caplog.text) is (
+        managed and text.strip() != "<finished>"
+    )
     assert not event.is_stopped()
     if not hidden:
         assert response.completion_text == text
 
 
 @pytest.mark.asyncio
-async def test_finished_marker_does_not_discard_media(plugin):
+async def test_final_output_discards_media_and_reasoning(plugin):
     from astrbot.core.message.components import Image
 
     event = make_event()
@@ -1423,13 +1427,17 @@ async def test_finished_marker_does_not_discard_media(plugin):
     result = event.plain_result("<finished>")
     result.chain.append(Image.fromURL("https://example.com/image.png"))
     response = LLMResponse(role="assistant", result_chain=result)
-    await plugin.suppress_finished_reply(event, response)
-    assert response.result_chain is result
+    await plugin.suppress_final_reply(event, response)
+    assert response.result_chain is None
+    assert response.completion_text == ""
+    assert response.reasoning_content == ""
 
 
 @pytest.mark.asyncio
-async def test_native_split_replies_are_recorded_and_finished_marker_stays_in_debug_only(
+@pytest.mark.parametrize("final_text", ["<finished>", "Unsent final output"])
+async def test_native_split_replies_are_recorded_and_final_output_stays_in_debug_only(
     plugin,
+    final_text,
 ):
     from astrbot.core.tools.message_tools import SendMessageToUserTool
 
@@ -1448,11 +1456,11 @@ async def test_native_split_replies_are_recorded_and_finished_marker_stays_in_de
     for text in ("Alice: first answer", "Bob: second answer"):
         result = await tool.call(context, messages=[{"type": "plain", "text": text}])
         assert result.startswith("Message sent")
-    response = LLMResponse(role="assistant", completion_text="<finished>")
+    response = LLMResponse(role="assistant", completion_text=final_text)
     await plugin.record_response(event, response)
     await plugin.record_response(event, response)
     await plugin.dump_agent_response(event, response)
-    await plugin.suppress_finished_reply(event, response)
+    await plugin.suppress_final_reply(event, response)
     assert response.completion_text == ""
     assert response.result_chain is None
     assert not event.is_stopped()
@@ -1466,7 +1474,7 @@ async def test_native_split_replies_are_recorded_and_finished_marker_stays_in_de
     outputs = list(plugin.debug_dumper.directory.rglob("*agent_output*.json"))
     assert (
         json.loads(outputs[0].read_text(encoding="utf-8"))["payload"]["completion_text"]
-        == "<finished>"
+        == final_text
     )
 
 

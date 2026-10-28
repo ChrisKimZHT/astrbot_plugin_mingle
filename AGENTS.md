@@ -106,19 +106,20 @@
   through a managed request hook before debug capture, after AstrBot resolves
   the Agent persona. Keep batch metadata and chat JSON in the user prompt;
   prepend the fixed continuation notice there for reruns.
-- Generator defaults allow separate current-chat replies through the native
-  send_message_to_user tool when multiple members and topics warrant it. Emit
-  exactly <finished> only after successful sends; fall back to normal output if
-  the tool is unavailable or fails. Do not inject tools beyond native availability.
-  Set enable_streaming=False on admitted managed events so the marker cannot
-  leak as deltas; do not change global streaming settings or unmanaged events.
-  Capture the raw final response in debug, then suppress standalone plain-text
-  <finished> assistant responses in a lower-priority response hook before outgoing
-  chains are produced. Do not stop the event. Do not treat text containing the
-  marker, mixed media, tool calls or error responses as the sentinel.
-  Record successful current-session native send-tool text with per-turn indexed
-  source keys; do not store the marker as a bot chat row. Normal Agent history
-  saving continues, including tool calls, results and the final completion marker.
+- Generator defaults require user-facing replies through the native
+  send_message_to_user tool. The model decides message timing and recipients
+  naturally within the current chat, and sends a brief starting message before
+  long-running tools. Emit exactly <finished> when done; no final-output fallback
+  is sent when the tool is unavailable or fails. Do not inject tools beyond native
+  availability. Set enable_streaming=False on admitted managed events; do not
+  change global streaming settings or unmanaged events.
+  Capture the raw final response in debug, then suppress all managed final text,
+  media and reasoning in a lower-priority response hook before outgoing chains
+  are produced. Log a warning when the trimmed final text is not <finished>.
+  Do not stop the event. Record only successful current-session native send-tool
+  text with per-turn indexed source keys as bot chat rows, never final output.
+  Normal Agent history saving continues, including tool calls, results and the
+  final completion marker.
 - `src/history.py` owns an independent SQLite database and image cache under
   `StarTools.get_data_dir("astrbot_plugin_mingle")`.
 - `src/settings.py` validates immutable runtime settings. `_conf_schema.json` exposes

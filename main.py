@@ -633,7 +633,7 @@ class MinglePlugin(Star):
     async def record_response(
         self, event: AstrMessageEvent, response: LLMResponse
     ) -> None:
-        """Record completed managed Agent responses independently of LLM history.
+        """Record successful current-session send-tool text independently of LLM history.
 
         Args:
             event: Event owning the Agent turn.
@@ -653,25 +653,14 @@ class MinglePlugin(Star):
                     role="bot",
                     source_key=f"bot:{turn_id}:sent:{index}",
                 )
-            chain = response.result_chain
-            if response.completion_text.strip() == "<finished>" and (
-                chain is None or all(isinstance(part, Plain) for part in chain.chain)
-            ):
-                return
-            if chain is None and response.completion_text:
-                chain = event.plain_result(response.completion_text)
-            if chain is not None:
-                await self.history.record(
-                    event, chain.chain, role="bot", source_key=f"bot:{turn_id}"
-                )
         except Exception:
             self.logger.exception("Failed to record Mingle Agent response")
 
     @filter.on_llm_response(priority=-maxsize - 1)
-    async def suppress_finished_reply(
+    async def suppress_final_reply(
         self, event: AstrMessageEvent, response: LLMResponse
     ) -> None:
-        """Clear a standalone completion marker after the raw debug capture.
+        """Suppress managed final output after the raw debug capture.
 
         Args:
             event: Managed turn owning the completed Agent response.
@@ -679,20 +668,16 @@ class MinglePlugin(Star):
         """
         if not self.available or not event.get_extra("mingle_managed", False):
             return
-        chain = response.result_chain
-        if (
-            response.role == "assistant"
-            and not response.tools_call_name
-            and (chain is None or all(isinstance(part, Plain) for part in chain.chain))
-            and response.completion_text.strip() == "<finished>"
-        ):
-            response.result_chain = None
-            response.completion_text = ""
-            event.set_extra("_llm_reasoning_content", "")
-            self.logger.debug(
-                "Suppressed Mingle completion marker for session %s",
+        if response.completion_text.strip() != "<finished>":
+            self.logger.warning(
+                "Mingle Agent final output was not <finished> for session %s; "
+                "the final response was suppressed",
                 event.unified_msg_origin,
             )
+        response.result_chain = None
+        response.completion_text = ""
+        response.reasoning_content = ""
+        event.set_extra("_llm_reasoning_content", "")
 
     @filter.llm_tool(name="mingle_chat_history")
     async def chat_history(
@@ -837,7 +822,7 @@ class MinglePlugin(Star):
         size: str = "auto",
         quality: str = "auto",
     ) -> str:
-        """Generate one image from text and send it directly to the current chat.
+        """[Long-running tool] Generate one image and send it to the current chat.
 
         Use when the user requests a new image. This tool sends the image itself;
         do not send it again. It does not edit existing images. A successful result
