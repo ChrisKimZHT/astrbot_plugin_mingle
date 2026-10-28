@@ -28,7 +28,7 @@ from .src.tools import history as history_tools
 from .src.tools import images as image_tools
 from .src.utils.history_formatting import format_prompt_history
 from .toolbox.calculate import calculate
-from .toolbox.image_generate import generate_image
+from .toolbox.images import edit_image, generate_image
 from .toolbox.random import draw_random
 from .toolbox.time import get_current_time
 
@@ -495,6 +495,7 @@ class MinglePlugin(Star):
             "mingle_calculate": self.settings.toolbox_calculate_enabled,
             "mingle_random": self.settings.toolbox_random_enabled,
             "mingle_generate_image": self.settings.toolbox_image_generate_enabled,
+            "mingle_edit_image": self.settings.toolbox_image_edit_enabled,
         }
         disabled = {
             name
@@ -853,6 +854,58 @@ class MinglePlugin(Star):
             provider,
             self.logger,
             prompt=prompt,
+            size=size,
+            quality=quality,
+        )
+
+    @filter.llm_tool(name="mingle_edit_image")
+    async def edit_image(
+        self,
+        event: AstrMessageEvent,
+        prompt: str,
+        record_ids: list[int],
+        image_indices: list[int],
+        size: str = "auto",
+        quality: str = "auto",
+    ) -> str:
+        """[Long-running tool] Edit cached images or transfer a reference style.
+
+        Use current-session Mingle record IDs, never platform IDs. Supply one to
+        four images in order and explain each image's role in the prompt. Describe
+        what to change and preserve, including exact text to render. Natural
+        language is accepted; English keywords are not required. Inspect images
+        with mingle_view_image when needed. Sends one image directly to this chat;
+        do not send it again. On failure, explain without automatically retrying.
+        A successful send call is not a delivery receipt. Managed turns only.
+
+        Args:
+            prompt (str): Editing instructions, between 1 and 32000 characters.
+            record_ids (list[int]): One to four Mingle image record IDs in order.
+            image_indices (list[int]): Matching zero-based image indices.
+            size (str): auto, 1024x1024, 1536x1024 or 1024x1536; default auto.
+            quality (str): auto, low, medium or high; default auto.
+
+        Returns:
+            JSON with the send result or an explicit error, without image content.
+        """
+        if (
+            not self.available
+            or not self.settings.toolbox_enabled
+            or not self.settings.toolbox_image_edit_enabled
+        ):
+            return json.dumps(
+                {"error": "The image editing tool is disabled in Mingle."}
+            )
+        provider_id = self.settings.toolbox_image_edit_provider_id
+        provider = self.context.get_provider_by_id(provider_id) if provider_id else None
+        return await edit_image(
+            event,
+            self.history,
+            provider,
+            self.logger,
+            prompt=prompt,
+            record_ids=record_ids,
+            image_indices=image_indices,
             size=size,
             quality=quality,
         )

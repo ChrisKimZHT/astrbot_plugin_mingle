@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
-from mingle_tests_plugin.toolbox import image_generate
+from mingle_tests_plugin.toolbox import images as image_generate
 from PIL import Image
 
 
@@ -282,3 +282,26 @@ async def test_cancellation_propagates_without_sending(image_request, monkeypatc
         await task
     assert client.is_closed
     case.event.send.assert_not_awaited()
+
+
+async def test_edit_uploads_reference_bytes_to_edit_endpoint(image_request):
+    case = image_request
+    data = base64.b64decode(case.encoded)
+    result = json.loads(
+        await image_generate._request_image(
+            case.event,
+            case.provider,
+            case.logger,
+            prompt="Preserve the face; use watercolor",
+            reference_images=[("reference_1.png", data, "image/png")],
+        )
+    )
+    assert result["sent"] is True
+    assert len(case.calls) == 1
+    request = case.calls[0]
+    assert request.url.path == "/v1/images/edits"
+    assert "multipart/form-data" in request.headers["content-type"]
+    assert data in request.content
+    assert b'filename="reference_1.png"' in request.content
+    assert b"Preserve the face; use watercolor" in request.content
+    case.event.send.assert_awaited_once()

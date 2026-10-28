@@ -1,4 +1,4 @@
-"""Text-to-image generation through the standard OpenAI Images API."""
+"""Image generation and reference editing through the OpenAI Images API."""
 
 import asyncio
 import base64
@@ -13,6 +13,9 @@ from astrbot.core.provider.provider import Provider
 from astrbot.core.utils.network_utils import create_proxy_client
 from openai import APIStatusError, APITimeoutError, AsyncOpenAI
 from PIL import Image
+
+from ..src.history import ChatHistory, boundary_group
+from ..src.utils.image_preprocessing import prepare_image
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
@@ -48,7 +51,40 @@ async def generate_image(
     size: str = "auto",
     quality: str = "auto",
 ) -> str:
-    """Generate and send one image without modifying the selected provider.
+    """Generate a new image from text and send it to the current chat.
+
+    Args:
+        event: Event defining the destination chat.
+        provider: Explicitly selected OpenAI-compatible image provider.
+        logger: Logger for safe failure metadata.
+        prompt: Description of the requested image.
+        size: Output resolution or auto.
+        quality: Output quality or auto.
+
+    Returns:
+        JSON send result or an explicit error, without image content.
+    """
+    return await _request_image(
+        event,
+        provider,
+        logger,
+        prompt=prompt,
+        size=size,
+        quality=quality,
+    )
+
+
+async def _request_image(
+    event: AstrMessageEvent,
+    provider: Provider | None,
+    logger: logging.Logger,
+    *,
+    prompt: str,
+    size: str = "auto",
+    quality: str = "auto",
+    reference_images: list[tuple[str, bytes, str]] | None = None,
+) -> str:
+    """Request and send one image without modifying the selected provider.
 
     Args:
         event: Event defining the destination chat.
@@ -58,6 +94,7 @@ async def generate_image(
         prompt: Text description of the requested image.
         size: Standard GPT Image resolution or auto.
         quality: Standard GPT Image quality or auto.
+        reference_images: Validated uploads for editing, or None for text generation.
 
     Returns:
         JSON acknowledging a completed send call, or a safe explicit error.
@@ -109,7 +146,12 @@ async def generate_image(
                 timeout=timeout,
                 max_retries=0,
             ) as client:
-                response = await client.images.generate(
+                method = (
+                    client.images.edit if reference_images else client.images.generate
+                )
+                image_args = {"image": reference_images} if reference_images else {}
+                response = await method(
+                    **image_args,
                     model=model,
                     prompt=prompt,
                     n=1,
@@ -158,4 +200,96 @@ async def generate_image(
             "count": 1,
             "message": "Image sent to the current chat. Do not send it again.",
         }
+    )
+
+
+async def edit_image(
+    event: AstrMessageEvent,
+    history: ChatHistory,
+    provider: Provider | None,
+    logger: logging.Logger,
+    *,
+    prompt: str,
+    record_ids: list[int],
+    image_indices: list[int],
+    size: str = "auto",
+    quality: str = "auto",
+) -> str:
+    """Load authorized reference images and submit a single paid edit request.
+
+    Args:
+        event: Current managed event defining session and destination.
+        history: Mingle image storage enforcing session and boundary visibility.
+        provider: Explicitly selected OpenAI-compatible image provider.
+        logger: Logger for safe failure metadata.
+        prompt: Instructions defining changes and reference roles.
+        record_ids: One to four Mingle records, in reference order.
+        image_indices: Matching zero-based image indices.
+        size: Output resolution or auto.
+        quality: Output quality or auto.
+
+    Returns:
+        JSON send result or an explicit error. No image content is returned.
+    """
+    if not event.get_extra("mingle_managed", False):
+        return json.dumps({"error": "Image editing requires a managed Mingle turn."})
+    if (
+        not isinstance(record_ids, list)
+        or not isinstance(image_indices, list)
+        or not 1 <= len(record_ids) <= 4
+        or len(record_ids) != len(image_indices)
+        or any(type(value) is not int or value <= 0 for value in record_ids)
+        or any(type(value) is not int or value < 0 for value in image_indices)
+    ):
+        return json.dumps(
+            {
+                "error": "Supply one to four record IDs and matching nonnegative image indices."
+            }
+        )
+    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 32000:
+        return json.dumps({"error": "prompt must contain 1 to 32000 characters."})
+    references = []
+    total_bytes = 0
+    for record_id, image_index in zip(record_ids, image_indices):
+        image = await history.read_image(
+            event.unified_msg_origin,
+            record_id,
+            image_index,
+            boundary=boundary_group(event),
+        )
+        if image is None:
+            return json.dumps(
+                {
+                    "error": "Reference image unavailable, expired, or outside the current session or boundary."
+                }
+            )
+        data, mime = image
+        if len(data) > MAX_IMAGE_BYTES:
+            return json.dumps({"error": "Reference image exceeds the byte limit."})
+        try:
+            data, mime = await prepare_image(data, mime)
+        except Exception as error:
+            logger.warning(
+                "Mingle edit image preparation failed (%s)", type(error).__name__
+            )
+            return json.dumps({"error": "Reference image preparation failed."})
+        total_bytes += len(data)
+        if total_bytes > MAX_IMAGE_BYTES:
+            return json.dumps(
+                {"error": "Combined reference images exceed the byte limit."}
+            )
+        extension = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(
+            mime
+        )
+        if extension is None:
+            return json.dumps({"error": "Unsupported prepared reference image format."})
+        references.append((f"reference_{len(references) + 1}.{extension}", data, mime))
+    return await _request_image(
+        event,
+        provider,
+        logger,
+        prompt=prompt,
+        size=size,
+        quality=quality,
+        reference_images=references,
     )

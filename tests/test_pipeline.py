@@ -1306,6 +1306,15 @@ def test_new_tool_schemas_only_expose_model_arguments():
         "choices",
     }
     assert random_tool.parameters["properties"]["choices"]["items"]["type"] == "string"
+    edit_tool = llm_tools.get_func("mingle_edit_image")
+    assert set(edit_tool.parameters["properties"]) == {
+        "prompt",
+        "record_ids",
+        "image_indices",
+        "size",
+        "quality",
+    }
+    assert edit_tool.parameters["properties"]["record_ids"]["items"]["type"] == "number"
     image_tool = llm_tools.get_func("mingle_generate_image")
     assert set(image_tool.parameters["properties"]) == {"prompt", "size", "quality"}
     assert all(
@@ -1515,3 +1524,42 @@ async def test_agent_context_is_incremental_and_resets_with_conversation(plugin)
     conversation.history = json.dumps([{"role": "user", "content": "Native chat"}])
     native = await plugin._agent_prompt_history(event, conversation, [ids[-1]])
     assert [row["id"] for row in native] == ids[-1:]
+
+
+@pytest.mark.parametrize(
+    "master,individual", [(True, True), (True, False), (False, True)]
+)
+async def test_edit_tool_switches_and_provider(plugin, monkeypatch, master, individual):
+    from astrbot.core.agent.tool import FunctionTool, ToolSet
+
+    provider = object()
+    plugin.context.get_provider_by_id = Mock(return_value=provider)
+    edit = AsyncMock(return_value='{"sent": true}')
+    monkeypatch.setattr("mingle_tests_plugin.main.edit_image", edit)
+    plugin.settings = replace(
+        plugin.settings,
+        toolbox_enabled=master,
+        toolbox_image_edit_enabled=individual,
+        toolbox_image_edit_provider_id="edit-provider",
+    )
+    shared = ToolSet(
+        [FunctionTool(name="mingle_edit_image", parameters={}, description="")]
+    )
+    event = make_event(private=True)
+    request = ProviderRequest(prompt="edit", func_tool=shared)
+    await plugin.apply_toolbox_switches(event, request)
+    assert bool(request.func_tool.tools) is (master and individual)
+    assert len(shared.tools) == 1
+    result = json.loads(await plugin.edit_image(event, "Watercolor", [1], [0]))
+    if master and individual:
+        assert result["sent"]
+        plugin.context.get_provider_by_id.assert_called_once_with("edit-provider")
+        assert edit.await_args.args == (event, plugin.history, provider, plugin.logger)
+    else:
+        assert "error" in result
+        edit.assert_not_awaited()
+    plugin.available = False
+    edit.reset_mock()
+    assert "error" in json.loads(await plugin.edit_image(event, "Edit", [1], [0]))
+    edit.assert_not_awaited()
+    plugin.available = True

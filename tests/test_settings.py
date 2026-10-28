@@ -59,6 +59,7 @@ def test_schema_defaults_match_runtime_settings(tmp_path):
         "debug",
         "toolbox",
         "mingle_generate_image",
+        "mingle_edit_image",
     ]
     assert Settings.from_config(
         {"general": {"group_sessions": ["  group  ", ""]}}

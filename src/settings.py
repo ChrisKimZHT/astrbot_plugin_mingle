@@ -29,8 +29,10 @@ CONFIG_GROUPS = {
         "toolbox_calculate_enabled",
         "toolbox_random_enabled",
         "toolbox_image_generate_enabled",
+        "toolbox_image_edit_enabled",
     ),
     "mingle_generate_image": ("toolbox_image_generate_provider_id",),
+    "mingle_edit_image": ("toolbox_image_edit_provider_id",),
 }
 
 DEFAULT_JUDGE_PROMPT = (
@@ -94,6 +96,10 @@ DEFAULT_GENERATOR_PROMPT = (
     "successful result means the send call returned, not confirmed delivery. "
     "Explain failures without claiming success or automatically retrying "
     "generation.\n"
+    "- [Long-running tool] Use mingle_edit_image with current-session record IDs "
+    "and matching image indices to edit images or transfer a reference style. "
+    "Explain the roles of up to four references and what to change or preserve. "
+    "It sends one image directly; do not resend or automatically retry.\n"
     "\n"
     "## Sending messages\n"
     "Send all user-facing replies through send_message_to_user in the current "
@@ -148,6 +154,8 @@ class Settings:
     toolbox_time_enabled: bool = True
     toolbox_calculate_enabled: bool = True
     toolbox_random_enabled: bool = True
+    toolbox_image_edit_enabled: bool = True
+    toolbox_image_edit_provider_id: str = ""
     toolbox_image_generate_enabled: bool = True
     toolbox_image_generate_provider_id: str = ""
 
@@ -187,6 +195,7 @@ class Settings:
             "toolbox_calculate_enabled",
             "toolbox_random_enabled",
             "toolbox_image_generate_enabled",
+            "toolbox_image_edit_enabled",
         ):
             if not isinstance(getattr(settings, name), bool):
                 raise ValueError(f"{name} must be a boolean")
@@ -229,6 +238,7 @@ class Settings:
             "generator_prompt",
             "generator_prompt_append",
             "toolbox_image_generate_provider_id",
+            "toolbox_image_edit_provider_id",
         ):
             if not isinstance(getattr(settings, name), str):
                 raise ValueError(f"{name} must be a string")

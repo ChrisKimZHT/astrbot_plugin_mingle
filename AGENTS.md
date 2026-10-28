@@ -43,7 +43,7 @@
   unique candidate strings without replacement. Bound result counts and input
   sizes. Register both tools in main.py with independent default-true switches
   toolbox_calculate_enabled and toolbox_random_enabled in the toolbox group.
-- toolbox/image_generate.py implements mingle_generate_image through the standard
+- toolbox/images.py implements mingle_generate_image through the standard
   OpenAI /images/generations endpoint, with one PNG per call. Reuse an explicitly
   selected AstrBot OpenAI-compatible provider's model name, current key, base URL,
   proxy, headers and timeout without mutating its client or configuration. Resolve
@@ -128,8 +128,8 @@
   generator (生成器), history (聊天记录), images (图片缓存), debug (调试),
   toolbox (额外工具箱), followed by tool-specific configuration groups named
   after the actual registered tools. Keep the master and individual enable
-  switches in toolbox; place other tool settings in their own sections. Only
-  mingle_generate_image currently needs such a section.
+  switches in toolbox; place other tool settings in their own sections. Image generation and
+  image editing each have such a section.
   CONFIG_GROUPS maps
   grouped configuration to flat immutable runtime fields. Flat legacy settings
   are unsupported; do not add migration or fallback logic for this test version.
@@ -326,3 +326,12 @@ be verified separately with configured credentials; tests do not contact them.
 - tests/conftest.py assigns a disposable ASTRBOT_ROOT before framework imports
   in the test process and restores it at teardown. Keep test import side effects
   out of the plugin checkout and real framework data directories.
+
+- toolbox/images.py also implements mingle_edit_image using the standard OpenAI
+  /images/edits endpoint with one to four current-session cached references,
+  respecting managed-turn access and group boundaries. Reuse image preparation
+  and a shared private request/validation/send function, with separate generation
+  and editing entry functions registered as two tools. Bound combined prepared uploads to
+  20 MiB. Keep an independent default-true toolbox_image_edit_enabled switch and
+  provider selection under mingle_edit_image. Never accept model-supplied paths
+  or sessions, retry paid edits automatically, or return images to the model.
