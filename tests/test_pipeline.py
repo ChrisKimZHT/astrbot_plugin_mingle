@@ -935,6 +935,80 @@ async def test_toolbox_switches_do_not_add_tools_excluded_by_persona(plugin):
     assert request.func_tool is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("master", [True, False])
+@pytest.mark.parametrize("individual", [True, False])
+@pytest.mark.parametrize(
+    "name,setting,method,arguments",
+    [
+        (
+            "mingle_calculate",
+            "toolbox_calculate_enabled",
+            "calculate",
+            {"expression": "0.1+0.2"},
+        ),
+        ("mingle_random", "toolbox_random_enabled", "random", {"choices": ["a"]}),
+    ],
+)
+async def test_new_tool_switches_are_independent(
+    plugin, master, individual, name, setting, method, arguments
+):
+    from astrbot.core.agent.tool import FunctionTool, ToolSet
+
+    plugin.settings = replace(
+        plugin.settings, toolbox_enabled=master, **{setting: individual}
+    )
+    names = [
+        "mingle_get_time",
+        "mingle_calculate",
+        "mingle_random",
+        "mingle_chat_history",
+        "native_tool",
+    ]
+    shared = ToolSet(
+        [FunctionTool(name=item, parameters={}, description="") for item in names]
+    )
+    request = ProviderRequest(prompt="test", func_tool=shared)
+    event = make_event()
+    await plugin.apply_toolbox_switches(event, request)
+    actual = {tool.name for tool in request.func_tool.tools}
+    for item in names:
+        expected = (
+            True
+            if item in {"mingle_chat_history", "native_tool"}
+            else master and (individual if item == name else True)
+        )
+        assert (item in actual) is expected
+    assert [tool.name for tool in shared.tools] == names
+    assert (
+        "error" not in json.loads(await getattr(plugin, method)(event, **arguments))
+    ) is (master and individual)
+    assert getattr(plugin.settings, setting) is individual
+    plugin.available = False
+    assert "error" in json.loads(await getattr(plugin, method)(event, **arguments))
+    await plugin.apply_toolbox_switches(event, request)
+    assert {tool.name for tool in request.func_tool.tools} == {
+        "mingle_chat_history",
+        "native_tool",
+    }
+    plugin.available = True
+
+
+def test_new_tool_schemas_only_expose_model_arguments():
+    from astrbot.core.provider.register import llm_tools
+
+    calculate_tool = llm_tools.get_func("mingle_calculate")
+    random_tool = llm_tools.get_func("mingle_random")
+    assert set(calculate_tool.parameters["properties"]) == {"expression"}
+    assert set(random_tool.parameters["properties"]) == {
+        "minimum",
+        "maximum",
+        "count",
+        "choices",
+    }
+    assert random_tool.parameters["properties"]["choices"]["items"]["type"] == "string"
+
+
 def test_toolbox_switches_run_before_request_debug_capture():
     from astrbot.core.star.star_handler import star_handlers_registry
 

@@ -22,7 +22,12 @@ CONFIG_GROUPS = {
     ),
     "images": ("image_retention_days", "image_cache_mb", "max_image_mb"),
     "debug": ("debug_sessions",),
-    "toolbox": ("toolbox_enabled", "toolbox_time_enabled"),
+    "toolbox": (
+        "toolbox_enabled",
+        "toolbox_time_enabled",
+        "toolbox_calculate_enabled",
+        "toolbox_random_enabled",
+    ),
 }
 
 DEFAULT_JUDGE_PROMPT = (
@@ -76,6 +81,8 @@ class Settings:
     max_image_mb: int = 20
     toolbox_enabled: bool = True
     toolbox_time_enabled: bool = True
+    toolbox_calculate_enabled: bool = True
+    toolbox_random_enabled: bool = True
 
     @classmethod
     def from_config(cls, config: dict) -> "Settings":
@@ -110,6 +117,8 @@ class Settings:
             "redaction_enabled",
             "toolbox_enabled",
             "toolbox_time_enabled",
+            "toolbox_calculate_enabled",
+            "toolbox_random_enabled",
         ):
             if not isinstance(getattr(settings, name), bool):
                 raise ValueError(f"{name} must be a boolean")

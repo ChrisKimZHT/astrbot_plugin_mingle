@@ -24,6 +24,8 @@ from mingle_tests_plugin.src.settings import Settings
         {"scheduler": None},
         {"toolbox": {"toolbox_enabled": "false"}},
         {"toolbox": {"toolbox_time_enabled": None}},
+        {"toolbox": {"toolbox_calculate_enabled": 1}},
+        {"toolbox": {"toolbox_random_enabled": "false"}},
     ],
 )
 def test_invalid_settings_fail_at_startup(config):

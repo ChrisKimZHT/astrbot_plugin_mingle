@@ -164,8 +164,20 @@
       "toolbox_time_enabled": {
         "type": "bool",
         "default": true,
-        "description": "获取当前时间",
-        "hint": "控制 mingle_get_time 工具；跟随当前会话的 AstrBot 时区配置。总开关也必须开启。"
+        "description": "mingle_get_time",
+        "hint": "查询当前日期、时间和星期，跟随当前会话的 AstrBot 时区配置。总开关也必须开启。"
+      },
+      "toolbox_calculate_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "mingle_calculate",
+        "hint": "支持受限的十进制表达式计算，28 位有效数字。总开关也必须开启。"
+      },
+      "toolbox_random_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "mingle_random",
+        "hint": "支持区间整数、掷骰子和候选项不放回抽取。总开关也必须开启。"
       }
     }
   }

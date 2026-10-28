@@ -33,6 +33,13 @@
   check switches at execution time to reject stale calls. The master switch
   overrides individual settings without changing them. Core Mingle tools and
   AstrBot built-in tools remain unaffected.
+- toolbox/calculate.py implements mingle_calculate using a bounded arithmetic
+  AST and decimal operations, never eval or arbitrary Python execution. Limit
+  input length, AST nodes, exponents and intermediate magnitudes.
+  toolbox/random.py implements mingle_random: integers with replacement or
+  unique candidate strings without replacement. Bound result counts and input
+  sizes. Register both tools in main.py with independent default-true switches
+  toolbox_calculate_enabled and toolbox_random_enabled in the toolbox group.
 - Keep business modules in the `src/` package. The root `main.py` remains the
   AstrBot entry point and uses relative imports from `.src`. Keep tests in the
   root `tests/` directory and import business modules through the `src` package.
