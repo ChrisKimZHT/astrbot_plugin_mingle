@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from astrbot.api import AstrBotConfig
 from astrbot.core.message.components import Plain
+from astrbot.core.message.message_event_result import ResultContentType
 from astrbot.core.pipeline.context_utils import call_handler
 from astrbot.core.pipeline.process_stage.stage import ProcessStage
 from astrbot.core.pipeline.scheduler import PipelineScheduler
@@ -362,6 +363,220 @@ async def test_default_pipeline_finishes_history_before_next_turn(plugin):
         a_task.cancel()
         b_task.cancel()
         await asyncio.gather(a_task, b_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_arrival", [False, True])
+@pytest.mark.parametrize("recovery_final", ["<finished>", "Still not finished"])
+async def test_protocol_recovery_saves_history_claims_arrivals_and_runs_only_once(
+    plugin, with_arrival, recovery_final
+):
+    from astrbot.core.agent.message import Message, bind_checkpoint_messages
+    from astrbot.core.agent.tool import ToolSet
+    from astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal import (
+        InternalAgentSubStage,
+    )
+    from astrbot.core.tools.message_tools import SendMessageToUserTool
+
+    first_started, release_first = asyncio.Event(), asyncio.Event()
+    arrival_judged = asyncio.Event()
+    requests, saved = [], []
+    turn_ids = []
+    conversation = plugin.context.conversation_manager.get_conversation.return_value
+    sender = SimpleNamespace(send_message=AsyncMock(return_value=True))
+    tool = SendMessageToUserTool()
+    saver = object.__new__(InternalAgentSubStage)
+    saver.conv_manager = SimpleNamespace(update_conversation=AsyncMock())
+    first = make_event("1", private=True)
+    plugin.debug_dumper.settings = replace(
+        plugin.settings, debug_sessions=(first.unified_msg_origin,)
+    )
+
+    async def judge(**kwargs):
+        arrival_judged.set()
+        return LLMResponse(role="assistant", completion_text='{"should_reply": true}')
+
+    plugin.context.llm_generate.side_effect = judge
+
+    class PluginDispatch:
+        async def process(self, event):
+            async for value in call_handler(event, plugin.on_message):
+                yield value
+
+    class Agent:
+        async def process(self, event):
+            request = event.get_extra("provider_request")
+            requests.append(request)
+            turn_ids.append(event.get_extra("mingle_turn_id"))
+            request.func_tool = ToolSet([tool])
+            await plugin.append_generator_instructions(event, request)
+            await plugin.dump_agent_request(event, request)
+            if len(requests) == 1:
+                first_started.set()
+                await release_first.wait()
+                final_text = "Unsent final answer"
+                sent_text = "First part"
+            else:
+                assert saved == ["Unsent final answer"]
+                assert "Unsent final answer" in request.conversation.history
+                assert request.contexts == []
+                assert request.prompt.startswith(
+                    "The previous turn did not follow the completion protocol: "
+                    "end with exactly <finished>. Content in the final response "
+                    "is not sent to the user. Review messages already sent "
+                    "successfully and use the send_message_to_user tool to send "
+                    "any remaining replies. Avoid duplicate messages and do not mention this "
+                    "recovery run."
+                )
+                state = plugin.scheduler.sessions[event.unified_msg_origin]
+                _, records_json = request.prompt.rsplit("\n", 1)
+                records = json.loads(records_json)
+                if with_arrival:
+                    assert (
+                        "Meanwhile, the following new messages have arrived."
+                        in request.prompt
+                    )
+                    assert [row["text"] for row in records] == ["message 2"]
+                    assert len(state.active_ids) == 2
+                else:
+                    assert (
+                        "Meanwhile, the following new messages have arrived."
+                        not in request.prompt
+                    )
+                    assert records == []
+                    assert len(state.active_ids) == 1
+                assert not state.active.finished.is_set()
+                final_text = recovery_final
+                sent_text = "Remaining answer"
+            context = SimpleNamespace(
+                context=SimpleNamespace(event=event, context=sender)
+            )
+            await tool.call(context, messages=[{"type": "plain", "text": sent_text}])
+            response = LLMResponse(role="assistant", completion_text=final_text)
+            runtime = bind_checkpoint_messages(json.loads(conversation.history))
+            runtime.extend(
+                [
+                    Message(role="user", content=request.prompt),
+                    Message(role="assistant", content=final_text),
+                ]
+            )
+            await plugin.record_response(event, response)
+            await plugin.dump_agent_response(event, response)
+            await plugin.suppress_final_reply(event, response)
+            assert response.completion_text == final_text
+            event.set_result(
+                event.plain_result(response.completion_text).set_result_content_type(
+                    ResultContentType.LLM_RESULT
+                )
+            )
+            yield
+            await saver._save_to_history(event, request, response, runtime, None)
+            conversation.history = json.dumps(
+                saver.conv_manager.update_conversation.call_args.kwargs["history"]
+            )
+            saved.append(final_text)
+
+    class Respond:
+        async def process(self, event):
+            await plugin.suppress_final_result(event)
+            assert not event.get_result().chain
+
+    process = ProcessStage()
+    process.ctx = SimpleNamespace(
+        astrbot_config={"provider_settings": {"enable": True}}
+    )
+    process.star_request_sub_stage = PluginDispatch()
+    process.agent_sub_stage = Agent()
+    pipeline = object.__new__(PipelineScheduler)
+    pipeline.stages = [process, Respond()]
+    first.set_extra("activated_handlers", [SimpleNamespace(event_filters=[])])
+    tasks = [asyncio.create_task(pipeline._process_stages(first))]
+    try:
+        await asyncio.wait_for(first_started.wait(), 1)
+        if with_arrival:
+            second = make_event("2", private=True)
+            second.set_extra("activated_handlers", [SimpleNamespace(event_filters=[])])
+            tasks.append(asyncio.create_task(pipeline._process_stages(second)))
+            state = plugin.scheduler.sessions[first.unified_msg_origin]
+            await asyncio.wait_for(arrival_judged.wait(), 1)
+            await asyncio.wait_for(state.judgment_task, 1)
+        release_first.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), 2)
+        assert len(requests) == 2
+        assert len(set(turn_ids)) == 2
+        assert saved == ["Unsent final answer", recovery_final]
+        assert sender.send_message.await_count == 2
+        rows = await plugin.history.get(first.unified_msg_origin)
+        assert [row["text"] for row in rows if row["role"] == "bot"] == [
+            "First part",
+            "Remaining answer",
+        ]
+        outputs = list(plugin.debug_dumper.directory.rglob("*agent_output*.json"))
+        assert len(outputs) == 2
+        assert {
+            json.loads(path.read_text(encoding="utf-8"))["payload"]["completion_text"]
+            for path in outputs
+        } == {"Unsent final answer", recovery_final}
+    finally:
+        release_first.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "finished",
+        "error",
+        "missing_tool",
+        "inactive_tool",
+        "stop",
+        "aborted",
+        "disabled",
+        "group_off",
+        "ai_off",
+    ],
+)
+async def test_protocol_recovery_is_skipped_when_unnecessary_or_unavailable(
+    plugin, reason
+):
+    from astrbot.core.agent.tool import ToolSet
+    from astrbot.core.tools.message_tools import SendMessageToUserTool
+
+    event = make_event()
+    event.is_at_or_wake_command = True
+    handler = plugin.on_message(event)
+    try:
+        request = await asyncio.wait_for(anext(handler), 1)
+        if reason != "missing_tool":
+            tool = SendMessageToUserTool()
+            tool.active = reason != "inactive_tool"
+            request.func_tool = ToolSet([tool])
+        await plugin.append_generator_instructions(event, request)
+        response = LLMResponse(role="assistant", completion_text="Unsent answer")
+        if reason == "error":
+            response.role = "err"
+        elif reason == "finished":
+            response.completion_text = " \n<finished>\t"
+        await plugin.suppress_final_reply(event, response)
+        if reason == "stop":
+            event.set_extra("agent_stop_requested", True)
+        elif reason == "aborted":
+            event.set_extra("agent_user_aborted", True)
+        elif reason == "disabled":
+            plugin.settings = replace(plugin.settings, enabled=False)
+        elif reason == "group_off":
+            plugin.settings = replace(plugin.settings, group_sessions=())
+        elif reason == "ai_off":
+            plugin.context.get_config = lambda **kwargs: {
+                "provider_settings": {"enable": False}
+            }
+        assert [request async for request in handler] == []
+        assert event.is_stopped()
+    finally:
+        await handler.aclose()
 
 
 @pytest.mark.asyncio
@@ -1476,13 +1691,16 @@ async def test_final_output_is_suppressed_only_for_managed_turns(
     event.set_extra("mingle_managed", managed)
     response = LLMResponse(role="assistant" if llm else "err", completion_text=text)
     await plugin.suppress_final_reply(event, response)
-    assert (response.completion_text == "") is hidden
+    event.set_result(
+        event.plain_result(text).set_result_content_type(ResultContentType.LLM_RESULT)
+    )
+    await plugin.suppress_final_result(event)
+    assert (event.get_result().chain == []) is hidden
+    assert response.completion_text == text
     assert ("final output was not <finished>" in caplog.text) is (
         managed and text.strip() != "<finished>"
     )
     assert not event.is_stopped()
-    if not hidden:
-        assert response.completion_text == text
 
 
 @pytest.mark.asyncio
@@ -1496,7 +1714,7 @@ async def test_final_output_discards_media_and_reasoning(plugin):
     response = LLMResponse(role="assistant", result_chain=result)
     await plugin.suppress_final_reply(event, response)
     assert response.result_chain is None
-    assert response.completion_text == ""
+    assert response.completion_text == "<finished>"
     assert response.reasoning_content == ""
 
 
@@ -1528,7 +1746,7 @@ async def test_native_split_replies_are_recorded_and_final_output_stays_in_debug
     await plugin.record_response(event, response)
     await plugin.dump_agent_response(event, response)
     await plugin.suppress_final_reply(event, response)
-    assert response.completion_text == ""
+    assert response.completion_text == final_text
     assert response.result_chain is None
     assert not event.is_stopped()
     assert sender.send_message.await_count == 2

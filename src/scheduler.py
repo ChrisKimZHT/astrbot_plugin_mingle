@@ -162,6 +162,10 @@ class ChatScheduler:
                     limit=self.settings.initial_context_messages,
                     before_id=max(item.record_id for item in batch) + 1,
                 )
+                if leader.ready.done():
+                    state.judging = []
+                    batch = []
+                    continue
 
                 # Snapshot only after IO: the previous Agent may have finished
                 # during the history read, starting a fresh cooldown.
@@ -180,6 +184,11 @@ class ChatScheduler:
                 decision = await self._evaluate_batch(
                     key, state, batch, records, active
                 )
+                # Recovery may have claimed this batch while judgment awaited IO.
+                if leader.ready.done():
+                    state.judging = []
+                    batch = []
+                    continue
                 self._apply_control(key, state, leader, active, decision)
                 allowed = (
                     forced or decision.should_reply
@@ -397,6 +406,41 @@ class ChatScheduler:
             for item in state.approved:
                 item.release()
             state.approved.clear()
+
+    def claim_recovery_messages(self, ticket: PendingMessage) -> list[int] | None:
+        """Fold waiting arrivals into the active handler's single recovery run.
+
+        Release claimed handlers atomically so in-flight judgments cannot queue
+        their messages again or stop the recovery with a stale control result.
+
+        Args:
+            ticket: Active handler after its previous Agent pipeline has unwound.
+
+        Returns:
+            Claimed record IDs, or None when the active handler is no longer valid.
+        """
+        if self.closed:
+            return None
+        event = ticket.event
+        state = self.sessions.get(event.unified_msg_origin)
+        if state is None or state.active is not ticket:
+            return None
+        if ticket.finished.is_set() or event.is_stopped():
+            return None
+        if event.get_extra("agent_stop_requested", False):
+            return None
+        if event.get_extra("agent_user_aborted", False):
+            return None
+        waiting = _waiting_messages(state.pending + state.judging + state.approved)
+        record_ids = sorted(item.record_id for item in waiting)
+        state.pending = []
+        state.judging = []
+        state.approved = []
+        state.active_ids.extend(record_ids)
+        for item in waiting:
+            item.release()
+        state.changed.set()
+        return record_ids
 
     async def _execute_approved(self, key: str, state: SessionState) -> None:
         """Admit approved batches only after the previous pipeline has unwound.

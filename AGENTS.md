@@ -113,13 +113,34 @@
   is sent when the tool is unavailable or fails. Do not inject tools beyond native
   availability. Set enable_streaming=False on admitted managed events; do not
   change global streaming settings or unmanaged events.
-  Capture the raw final response in debug, then suppress all managed final text,
-  media and reasoning in a lower-priority response hook before outgoing chains
-  are produced. Log a warning when the trimmed final text is not <finished>.
+  Capture the raw final response in debug, then suppress managed final media and
+  reasoning in a lower-priority response hook. Preserve final text for AstrBot's
+  history-saving guard; clear the final model result in a low-priority native
+  result-decoration hook before sending. Log a warning when the trimmed final
+  text is not <finished>.
   Do not stop the event. Record only successful current-session native send-tool
   text with per-turn indexed source keys as bot chat rows, never final output.
   Normal Agent history saving continues, including tool calls, results and the
   final completion marker.
+- When a managed Agent returns assistant output other than trimmed <finished>,
+  allow at most one recovery request after its pipeline saves history. Keep the
+  same bound conversation and active scheduler ticket. Do not recover errors,
+  stopped/interrupted turns, or requests without the native send_message_to_user
+  tool. Recheck handling eligibility before recovery. Atomically claim valid
+  pending, judging and approved tickets into the active batch; released judgments
+  must not requeue them or apply stale stop/rerun actions. Later arrivals follow
+  ordinary scheduling. Reload saved history and prepend this exact user notice:
+  The previous turn did not follow the completion protocol: end with exactly
+  <finished>. Content in the final response is not sent to the user. Review
+  messages already sent successfully and use the send_message_to_user tool to
+  send any remaining replies. Avoid duplicate messages and do not mention this
+  recovery run.
+  If arrivals were claimed, append:
+  Meanwhile, the following new messages have arrived. You may reply to them
+  separately or together:
+  Keep the snapshot cursor format and assign a fresh turn ID and send-text list
+  per request so successful sends are recorded once. Release the batch and start
+  cooldown only after recovery has also fully unwound.
 - `src/history.py` owns an independent SQLite database and image cache under
   `StarTools.get_data_dir("astrbot_plugin_mingle")`.
 - `src/settings.py` validates immutable runtime settings. `_conf_schema.json` exposes

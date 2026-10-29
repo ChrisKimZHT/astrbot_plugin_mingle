@@ -386,42 +386,104 @@ class MinglePlugin(Star):
                 conversation_id = await conversation_manager.new_conversation(
                     event.unified_msg_origin, event.get_platform_id()
                 )
-            conversation = await conversation_manager.get_conversation(
-                event.unified_msg_origin, conversation_id
-            )
-            if conversation is None:
-                raise RuntimeError("The active conversation could not be loaded")
-            recent = await self._agent_prompt_history(event, conversation, batch_ids)
-            # New arrivals remain queryable without starting a concurrent Agent.
-            prompt_history = format_prompt_history(
-                recent,
-                self.context.get_config(umo=event.unified_msg_origin).get("timezone"),
-            )
-            prompt = (
-                f"New batch record IDs: {batch_ids}. Snapshot ends at record {max(batch_ids)}.\n"
-                + json.dumps(prompt_history, ensure_ascii=False)
-            )
-            if event.get_extra("mingle_resume_after_rerun", False):
-                prompt = (
-                    "The previous Agent turn was stopped because new messages corrected "
-                    "or redirected the task. Continue from its saved history, apply the "
-                    "new messages below, and reuse completed tool results when relevant.\n\n"
-                    + prompt
+            # Run normally first, then allow at most one recovery after history
+            # saving. A valid completion or unavailable recovery exits early.
+            for attempt in range(2):
+                is_recovery = attempt == 1
+                if not self.available or not self.settings.enabled:
+                    return
+                if event.is_stopped():
+                    return
+                if event.get_extra("agent_stop_requested", False):
+                    return
+                if event.get_extra("agent_user_aborted", False):
+                    return
+                if is_recovery:
+                    config = self.context.get_config(umo=event.unified_msg_origin)
+                    if not config.get("provider_settings", {}).get("enable", True):
+                        return
+                    if (
+                        config.get("agent_runner", {}).get("runner_type", "local")
+                        != "local"
+                    ):
+                        return
+                    if event.is_private_chat():
+                        if not self.settings.private_enabled:
+                            return
+                    elif not {
+                        event.unified_msg_origin,
+                        group_session,
+                        event.get_group_id(),
+                    }.intersection(self.settings.group_sessions):
+                        return
+                    if not await SessionServiceManager.should_process_llm_request(
+                        event
+                    ):
+                        return
+                    recovery_ids = self.scheduler.claim_recovery_messages(ticket)
+                    if recovery_ids is None:
+                        return
+                    batch_ids = batch_ids + recovery_ids
+                conversation = await conversation_manager.get_conversation(
+                    event.unified_msg_origin, conversation_id
                 )
-            if event.get_extra("agent_stop_requested", False):
-                return
-            event.set_extra("mingle_turn_id", uuid.uuid4().hex)
-            event.set_extra("mingle_agent_started", True)
-            # The final completion marker must not leak through streaming deltas
-            # before the pre-send hook can inspect the complete response.
-            event.set_extra("enable_streaming", False)
-            self.logger.info(
-                "Admitted Mingle turn for session %s: batch=%d, prompt_history=%d",
-                event.unified_msg_origin,
-                len(batch_ids),
-                len(recent),
-            )
-            yield event.request_llm(prompt=prompt, conversation=conversation)
+                if conversation is None:
+                    raise RuntimeError("The active conversation could not be loaded")
+                recent = await self._agent_prompt_history(
+                    event, conversation, batch_ids
+                )
+                # New arrivals remain queryable without starting a concurrent Agent.
+                timezone = self.context.get_config(umo=event.unified_msg_origin).get(
+                    "timezone"
+                )
+                prompt_history = format_prompt_history(recent, timezone)
+                prompt = (
+                    f"New batch record IDs: {batch_ids}. Snapshot ends at record {max(batch_ids)}.\n"
+                    + json.dumps(prompt_history, ensure_ascii=False)
+                )
+                if is_recovery:
+                    notice = (
+                        "The previous turn did not follow the completion protocol: "
+                        "end with exactly <finished>. Content in the final response "
+                        "is not sent to the user. Review messages already sent "
+                        "successfully and use the send_message_to_user tool to send "
+                        "any remaining replies. Avoid duplicate messages and do not mention this "
+                        "recovery run."
+                    )
+                    if recovery_ids:
+                        notice += (
+                            "\nMeanwhile, the following new messages have arrived. "
+                            "You may reply to them separately or together:"
+                        )
+                    prompt = notice + "\n\n" + prompt
+                elif event.get_extra("mingle_resume_after_rerun", False):
+                    prompt = (
+                        "The previous Agent turn was stopped because new messages corrected "
+                        "or redirected the task. Continue from its saved history, apply the "
+                        "new messages below, and reuse completed tool results when relevant.\n\n"
+                        + prompt
+                    )
+                if event.is_stopped() or event.get_extra("agent_stop_requested", False):
+                    return
+                event.set_extra("mingle_turn_id", uuid.uuid4().hex)
+                event.set_extra("mingle_agent_started", True)
+                event.set_extra("mingle_recovery_needed", False)
+                event.set_extra("mingle_send_tool_available", False)
+                event.set_extra("mingle_final_received", False)
+                event.set_extra("_send_message_to_user_current_session_plain_texts", [])
+                event.clear_result()
+                # Suppress streaming deltas until the final response hook runs.
+                event.set_extra("enable_streaming", False)
+                self.logger.info(
+                    "Admitted Mingle turn for session %s: batch=%d, prompt_history=%d, recovery=%s",
+                    event.unified_msg_origin,
+                    len(batch_ids),
+                    len(recent),
+                    is_recovery,
+                )
+                yield event.request_llm(prompt=prompt, conversation=conversation)
+                if not event.get_extra("mingle_recovery_needed", False):
+                    break
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -526,6 +588,11 @@ class MinglePlugin(Star):
         """Append configured generator instructions to managed system prompts."""
         if not self.available or not event.get_extra("mingle_managed", False):
             return
+        event.set_extra("mingle_send_tool_available", False)
+        if request.func_tool is not None:
+            send_tool = request.func_tool.get_tool("send_message_to_user")
+            if send_tool is not None:
+                event.set_extra("mingle_send_tool_available", send_tool.active)
         instructions = (
             self.settings.generator_prompt + self.settings.generator_prompt_append
         )
@@ -673,7 +740,7 @@ class MinglePlugin(Star):
     async def suppress_final_reply(
         self, event: AstrMessageEvent, response: LLMResponse
     ) -> None:
-        """Suppress managed final output after the raw debug capture.
+        """Check the completion protocol and suppress final media and reasoning.
 
         Args:
             event: Managed turn owning the completed Agent response.
@@ -681,16 +748,38 @@ class MinglePlugin(Star):
         """
         if not self.available or not event.get_extra("mingle_managed", False):
             return
-        if response.completion_text.strip() != "<finished>":
-            self.logger.warning(
-                "Mingle Agent final output was not <finished> for session %s; "
-                "the final response was suppressed",
-                event.unified_msg_origin,
-            )
+        event.set_extra("mingle_final_received", True)
+        event.set_extra("mingle_recovery_needed", False)
+        # AstrBot skips history saving when completion_text is empty. Preserve
+        # it here and clear the outgoing result through the decoration hook.
+        text = response.completion_text
         response.result_chain = None
-        response.completion_text = ""
+        response.completion_text = text
         response.reasoning_content = ""
         event.set_extra("_llm_reasoning_content", "")
+        if text.strip() == "<finished>":
+            return
+        self.logger.warning(
+            "Mingle Agent final output was not <finished> for session %s; "
+            "the final response was suppressed",
+            event.unified_msg_origin,
+        )
+        if response.role != "assistant":
+            return
+        if not event.get_extra("mingle_send_tool_available", False):
+            return
+        event.set_extra("mingle_recovery_needed", True)
+
+    @filter.on_decorating_result(priority=-maxsize - 1)
+    async def suppress_final_result(self, event: AstrMessageEvent) -> None:
+        """Hide managed final output without changing the response saved by AstrBot."""
+        if not self.available or not event.get_extra("mingle_managed", False):
+            return
+        if not event.get_extra("mingle_final_received", False):
+            return
+        result = event.get_result()
+        if result is not None:
+            result.chain = []
 
     @filter.llm_tool(name="mingle_chat_history")
     async def chat_history(

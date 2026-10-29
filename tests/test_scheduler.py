@@ -32,6 +32,82 @@ class Event:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "late_decision",
+    [ReplyDecision(True), ReplyDecision(True, "rerun"), ReplyDecision(False, "stop")],
+)
+async def test_recovery_claims_all_waiting_queues_and_ignores_late_judgment(
+    late_decision,
+):
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def evaluate(event, records, **kwargs):
+        if kwargs["new_message_ids"] == [3]:
+            started.set()
+            await release.wait()
+            return late_decision
+        return ReplyDecision(True)
+
+    scheduler = ChatScheduler(
+        Settings(debounce_seconds=0, cooldown_seconds=0),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        SimpleNamespace(evaluate=evaluate),
+        logging.getLogger(),
+    )
+    try:
+        active = await scheduler.submit(Event(), 1, True)
+        assert await asyncio.wait_for(active.ready, 1) == [1]
+        approved = await scheduler.submit(Event(), 2, False)
+        state = scheduler.sessions["group"]
+        await asyncio.wait_for(state.judgment_task, 1)
+        judging = await scheduler.submit(Event(), 3, False)
+        await asyncio.wait_for(started.wait(), 1)
+        pending = await scheduler.submit(Event(), 4, False)
+        assert scheduler.claim_recovery_messages(active) == [2, 3, 4]
+        assert state.active_ids == [1, 2, 3, 4]
+        assert not active.finished.is_set()
+        for item in (approved, judging, pending):
+            assert await item.ready is None
+        later = await scheduler.submit(Event(), 5, False)
+        release.set()
+        await asyncio.wait_for(state.judgment_task, 1)
+        assert not active.event.get_extra("agent_stop_requested", False)
+        assert state.active_ids == [1, 2, 3, 4]
+        assert not state.finished
+        assert [item.record_id for item in state.approved] == [5]
+        assert not later.ready.done()
+        active.finished.set()
+        assert await asyncio.wait_for(later.ready, 1) == [5]
+        assert all(
+            state.finished[record_id] == "completed" for record_id in range(1, 5)
+        )
+        later.finished.set()
+    finally:
+        release.set()
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["agent_stop_requested", "agent_user_aborted"])
+async def test_recovery_does_not_claim_messages_after_interruption(flag):
+    scheduler = ChatScheduler(
+        Settings(debounce_seconds=0),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        SimpleNamespace(evaluate=AsyncMock(return_value=ReplyDecision(True))),
+        logging.getLogger(),
+    )
+    try:
+        active = await scheduler.submit(Event(), 1, True)
+        await asyncio.wait_for(active.ready, 1)
+        pending = await scheduler.submit(Event(), 2, False)
+        active.event.set_extra(flag, True)
+        assert scheduler.claim_recovery_messages(active) is None
+        assert not pending.ready.done()
+    finally:
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
 async def test_coalesces_messages_preserves_forced_intent_and_waits_for_completion():
     judge = SimpleNamespace(
         should_reply=AsyncMock(return_value=False),
