@@ -107,7 +107,9 @@
   the Agent persona. Keep batch metadata and chat JSON in the user prompt;
   prepend the fixed continuation notice there for reruns.
 - Generator defaults require user-facing replies through the native
-  send_message_to_user tool. The model decides message timing and recipients
+  send_message_to_user tool, including ordinary text replies. Explicitly override
+  the native tool description's permission to reply directly in managed turns.
+  The model decides message timing and recipients
   naturally within the current chat, and sends a brief starting message before
   long-running tools. Emit exactly <finished> when done; no final-output fallback
   is sent when the tool is unavailable or fails. Do not inject tools beyond native
