@@ -677,6 +677,7 @@ def test_management_commands_use_native_group_and_admin_permissions():
         "debug",
         "barrier",
         "whisper",
+        "version",
     }
     assert not any(
         isinstance(item, PermissionTypeFilter) for item in root.event_filters
@@ -694,9 +695,19 @@ def test_management_commands_use_native_group_and_admin_permissions():
     assert "开启或关闭当前群聊：on|off" in str(error.value)
     assert "开启或关闭当前会话调试：on|off" in str(error.value)
     assert "管理群聊记录边界：set 设置，find 查看，clear 清除" in str(error.value)
+    from mingle_tests_plugin.src.utils.version import VERSION
+
+    assert f"查看版本：Mingle {VERSION}" in str(error.value)
+    version_command = next(
+        item for item in group.sub_command_filters if item.command_name == "version"
+    )
+    assert not any(
+        isinstance(item, PermissionTypeFilter)
+        for item in version_command.get_handler_md().event_filters
+    )
     assert root.desc == "管理 Mingle 群聊、调试和记录边界"
     for command in group.sub_command_filters:
-        if command.command_name == "whisper":
+        if command.command_name in {"whisper", "version"}:
             continue
         handler = command.get_handler_md()
         assert handler.extras_configs.get("sub_command") is True
@@ -716,6 +727,19 @@ def test_management_commands_use_native_group_and_admin_permissions():
         assert command.get_complete_command_names() == [
             f"mingle {command.command_name}"
         ]
+
+
+@pytest.mark.asyncio
+async def test_version_command_matches_installed_metadata(plugin):
+    import yaml
+
+    metadata = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "metadata.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    results = [value async for value in plugin.show_version(make_event())]
+    assert results[0].get_plain_text() == f"Mingle {metadata['version']}"
 
 
 @pytest.mark.asyncio

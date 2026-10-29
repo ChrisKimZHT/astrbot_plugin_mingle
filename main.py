@@ -26,6 +26,7 @@ from .src.settings import Settings
 from .src.tools import history as history_tools
 from .src.tools import images as image_tools
 from .src.utils.history_formatting import format_prompt_history
+from .src.utils.version import VERSION
 from .toolbox.calculate import calculate
 from .toolbox.images import edit_image, generate_image
 from .toolbox.random import draw_random
@@ -78,6 +79,13 @@ class MinglePlugin(Star):
     @filter.command_group("mingle", desc="管理 Mingle 群聊、调试和记录边界")
     def mingle(self):
         """Manage Mingle group access, debugging and history boundaries."""
+
+    @mingle.command("version", desc=f"查看版本：Mingle {VERSION}")
+    async def show_version(
+        self, event: AstrMessageEvent
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """Show the installed Mingle release version."""
+        yield event.plain_result(f"Mingle {VERSION}")
 
     @mingle.command("whisper", desc="忽略本条消息，不记录、不回复", priority=maxsize)
     async def whisper(self, event: AstrMessageEvent) -> None:
