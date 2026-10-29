@@ -14,6 +14,30 @@
 - Keep README.md concise and user-facing: describe capabilities, setup and
   commands. Maintain implementation agreements here instead of in the README.
 
+## Readability and behavior-preserving edits
+
+- Prioritize readability and ease of debugging over reducing line count. Split
+  complex conditions, calculations and function calls across multiple lines;
+  introduce meaningful intermediate variables when useful.
+- Never use nested ternary expressions. Use ternaries only for simple choices;
+  use ordinary `if/else` statements for more complex branches.
+- Use list, dictionary and set comprehensions only for simple transformations or
+  filters. Use ordinary loops for multiple loop levels, complex conditions or
+  long expressions. Apply the same readability rule to generator expressions.
+- Split long conditions across multiple lines or introduce clearly named boolean
+  variables. Preserve short-circuit evaluation when restructuring conditions.
+- Avoid deep nesting. Use early returns or `continue` where they improve
+  readability without changing behavior.
+- In style-only edits, preserve existing functionality, public interfaces,
+  return values and exception behavior. Do not bundle business logic rewrites
+  into readability changes.
+- Follow existing project configuration and agreements; they take precedence
+  if these style guidelines conflict with them.
+- Report potential bugs separately. Do not silently fix them unless the user
+  requests a fix.
+- Report only tests and checks actually run. Do not claim verification for
+  anything that was not executed.
+
 ## Message and Agent flow
 
 - `main.py` owns AstrBot registration, command bypass, request construction,
