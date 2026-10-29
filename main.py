@@ -10,8 +10,12 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.tool import FunctionTool, ToolSet
+from astrbot.core.cron.events import CronMessageEvent
 from astrbot.core.message.components import At, Plain
+from astrbot.core.platform.astrbot_message import MessageMember
+from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
+from astrbot.core.platform.platform_metadata import PlatformMetadata
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
@@ -33,6 +37,48 @@ from .toolbox.random import draw_random
 from .toolbox.time import get_current_time
 
 
+class RandomBubbleEvent(CronMessageEvent):
+    """Route a fresh internal trigger through AstrBot's ordinary pipeline.
+
+    Unlike a replayed incoming event, this owns no user attachments, permissions,
+    or message identity. Sending uses the framework's proactive event support.
+    """
+
+    def __init__(
+        self,
+        context,
+        session: MessageSession,
+        platform_meta: PlatformMetadata,
+        revision: int,
+        self_id: str = "astrbot",
+    ) -> None:
+        """Create an internal trigger without borrowing a member's event.
+
+        Args:
+            context: AstrBot context used for proactive sending.
+            session: Shared group session, never supplied by a model.
+            platform_meta: Current adapter metadata for normal pipeline routing.
+            revision: Sampled clock generation checked again at admission.
+            self_id: Last observed bot identity, or the framework cron default.
+        """
+        super().__init__(
+            context=context,
+            session=session,
+            message="Mingle proactive group-chat turn",
+            sender_id=self_id,
+            message_type=session.message_type,
+            extras={
+                "mingle_bubble_revision": revision,
+                "_api_key_allow_admin_role": False,
+            },
+        )
+        self.platform_meta = platform_meta
+        self.platform = platform_meta
+        self.message_obj.group_id = session.session_id
+        self.message_obj.sender = MessageMember("mingle_scheduler", "Mingle scheduler")
+        self.is_at_or_wake_command = False
+
+
 class MinglePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
@@ -47,7 +93,9 @@ class MinglePlugin(Star):
             self.history,
             ReplyJudge(context, self.settings, self.logger, self.debug_dumper),
             self.logger,
+            queue_bubble=self._queue_random_bubble,
         )
+        self.bubble_self_ids: dict[str, str] = {}
         self.cleanup_task: asyncio.Task | None = None
         self.handlers: set[asyncio.Task] = set()
         self.available = False
@@ -62,10 +110,45 @@ class MinglePlugin(Star):
             raise
         self.available = True
         self.cleanup_task = asyncio.create_task(self._cleanup_loop())
+        for key in self.settings.group_sessions:
+            try:
+                session = MessageSession.from_str(key)
+            except ValueError:
+                # Bare group IDs acquire a platform when their first message arrives.
+                continue
+            if session.message_type == MessageType.GROUP_MESSAGE:
+                self.scheduler.watch_random_bubbles(key)
         self.logger.info(
             "Mingle initialized with %d configured group sessions",
             len(self.settings.group_sessions),
         )
+
+    async def _queue_random_bubble(self, key: str, revision: int) -> None:
+        """Submit a fresh internal event using the current platform and profile.
+
+        Args:
+            key: Full shared-group UMO selected by the scheduler.
+            revision: Random clock generation used to reject stale queued work.
+        """
+        if not self.available or not self.settings.enabled:
+            return
+        session = MessageSession.from_str(key)
+        if not {key, session.session_id}.intersection(self.settings.group_sessions):
+            return
+        config = self.context.get_config(umo=key)
+        if config.get("platform_settings", {}).get("unique_session", False):
+            return
+        platform = self.context.get_platform_inst(session.platform_id)
+        if platform is None or platform.meta().name == "webchat":
+            return
+        event = RandomBubbleEvent(
+            self.context,
+            session,
+            platform.meta(),
+            revision,
+            self.bubble_self_ids.get(key, "astrbot"),
+        )
+        await self.context.get_event_queue().put(event)
 
     async def _cleanup_loop(self) -> None:
         """Enforce image and message retention every five minutes."""
@@ -225,7 +308,11 @@ class MinglePlugin(Star):
                 self.scheduler.judge.settings = self.settings
                 self.history.settings = self.settings
                 self.debug_dumper.settings = self.settings
+                if state == "on":
+                    self.bubble_self_ids[group_session] = event.get_self_id()
+                    self.scheduler.watch_random_bubbles(group_session)
                 if state == "off":
+                    await self.scheduler.stop_random_bubbles(group_session)
                     for session_state in self.scheduler.sessions.values():
                         for ticket in (
                             session_state.pending
@@ -334,11 +421,20 @@ class MinglePlugin(Star):
         Yields:
             A conversation-bound request only for the batch's admitted handler.
         """
+        is_bubble = isinstance(event, RandomBubbleEvent)
+        if is_bubble:
+            # Internal triggers must never fall through to ordinary handlers.
+            event.should_call_llm(True)
         if not self.available or not self.settings.enabled:
+            if is_bubble:
+                event.stop_event()
             return
         if event.get_self_id() == event.get_sender_id():
             return
-        for handler in event.get_extra("activated_handlers", []):
+        activated_handlers = []
+        if not is_bubble:
+            activated_handlers = event.get_extra("activated_handlers", [])
+        for handler in activated_handlers:
             is_whisper_handler = getattr(
                 handler, "handler_module_path", None
             ) == self.__module__ and handler.handler_name in {
@@ -359,7 +455,7 @@ class MinglePlugin(Star):
             ):
                 return
         # Matched commands remain owned by their original handlers, including /stop.
-        for handler in event.get_extra("activated_handlers", []):
+        for handler in activated_handlers:
             if any(
                 isinstance(item, (CommandFilter, CommandGroupFilter))
                 for item in handler.event_filters
@@ -377,12 +473,16 @@ class MinglePlugin(Star):
             return
         config = self.context.get_config(umo=event.unified_msg_origin)
         if not config.get("provider_settings", {}).get("enable", True):
+            if is_bubble:
+                event.stop_event()
             return
         if config.get("agent_runner", {}).get("runner_type", "local") != "local":
             self.logger.warning(
                 "Mingle requires the local Agent runner for session %s",
                 event.unified_msg_origin,
             )
+            if is_bubble:
+                event.stop_event()
             return
 
         ticket = None
@@ -392,33 +492,58 @@ class MinglePlugin(Star):
         # This flag disables the default fallback, not explicit ProviderRequests.
         event.should_call_llm(True)
         try:
-            record_id = await self.history.record(event, event.get_messages())
-            if record_id is None:
-                return
+            if is_bubble:
+                record_id = None
+            else:
+                record_id = await self.history.record(event, event.get_messages())
+                if record_id is None:
+                    return
             if not await SessionServiceManager.should_process_llm_request(event):
                 return
-            forced = event.is_private_chat() or event.is_at_or_wake_command
-            wake_requested = False
-            for component in event.get_messages():
-                if not isinstance(component, At):
-                    continue
-                if str(component.qq) == str(event.get_self_id()):
-                    wake_requested = True
-                    break
-            if not wake_requested:
-                for keyword in self.settings.sleep_wake_keywords:
-                    if event.get_message_str().find(keyword) != -1:
+            snapshot_end = None
+            if is_bubble:
+                if config.get("platform_settings", {}).get("unique_session", False):
+                    return
+                tail = await self.history.get(
+                    event.unified_msg_origin,
+                    limit=1,
+                    boundary=boundary_group(event),
+                )
+                ticket = await self.scheduler.admit_random_bubble(
+                    event, event.get_extra("mingle_bubble_revision")
+                )
+                if ticket is None:
+                    return
+                batch_ids = await ticket.ready
+                snapshot_end = max([row["id"] for row in tail] + batch_ids, default=0)
+            else:
+                if not event.is_private_chat() and not config.get(
+                    "platform_settings", {}
+                ).get("unique_session", False):
+                    self.bubble_self_ids[event.unified_msg_origin] = event.get_self_id()
+                    self.scheduler.watch_random_bubbles(event.unified_msg_origin)
+                forced = event.is_private_chat() or event.is_at_or_wake_command
+                wake_requested = False
+                for component in event.get_messages():
+                    if not isinstance(component, At):
+                        continue
+                    if str(component.qq) == str(event.get_self_id()):
                         wake_requested = True
                         break
-            ticket = await self.scheduler.submit(
-                event,
-                record_id,
-                forced,
-                wake=wake_requested,
-            )
-            batch_ids = await ticket.ready
+                if not wake_requested:
+                    for keyword in self.settings.sleep_wake_keywords:
+                        if event.get_message_str().find(keyword) != -1:
+                            wake_requested = True
+                            break
+                ticket = await self.scheduler.submit(
+                    event,
+                    record_id,
+                    forced,
+                    wake=wake_requested,
+                )
+                batch_ids = await ticket.ready
             if (
-                not batch_ids
+                (not batch_ids and not is_bubble)
                 or not self.available
                 or event.is_stopped()
                 or event.get_extra("agent_stop_requested", False)
@@ -476,13 +601,15 @@ class MinglePlugin(Star):
                     if recovery_ids is None:
                         return
                     batch_ids = batch_ids + recovery_ids
+                    if is_bubble:
+                        snapshot_end = max([snapshot_end] + batch_ids)
                 conversation = await conversation_manager.get_conversation(
                     event.unified_msg_origin, conversation_id
                 )
                 if conversation is None:
                     raise RuntimeError("The active conversation could not be loaded")
                 recent = await self._agent_prompt_history(
-                    event, conversation, batch_ids
+                    event, conversation, batch_ids, snapshot_end=snapshot_end
                 )
                 # New arrivals remain queryable without starting a concurrent Agent.
                 timezone = self.context.get_config(umo=event.unified_msg_origin).get(
@@ -490,9 +617,12 @@ class MinglePlugin(Star):
                 )
                 prompt_history = format_prompt_history(recent, timezone)
                 prompt = (
-                    f"New batch record IDs: {batch_ids}. Snapshot ends at record {max(batch_ids)}.\n"
+                    f"New batch record IDs: {batch_ids}. Snapshot ends at record "
+                    f"{snapshot_end if is_bubble else max(batch_ids)}.\n"
                     + json.dumps(prompt_history, ensure_ascii=False)
                 )
+                if is_bubble:
+                    prompt = self.settings.random_bubble_prompt + "\n\n" + prompt
                 if is_recovery:
                     notice = (
                         "The previous turn did not follow the completion protocol: "
@@ -549,15 +679,21 @@ class MinglePlugin(Star):
             event.stop_event()
             if ticket is not None:
                 ticket.finished.set()
+                if is_bubble:
+                    self.scheduler.finish_random_bubble(ticket)
             self.handlers.discard(task)
 
-    async def _agent_prompt_history(self, event, conversation, batch_ids) -> list[dict]:
+    async def _agent_prompt_history(
+        self, event, conversation, batch_ids, *, snapshot_end=None
+    ) -> list[dict]:
         """Load initial context or records added since the saved Agent snapshot.
 
         The cursor lives in persisted user prompts so conversation resets and
         plugin restarts follow the same history as the Agent.
         """
         saved = json.loads(conversation.history or "[]")
+        if snapshot_end is None:
+            snapshot_end = max(batch_ids)
         cursor = 0
         for message in saved:
             if message.get("role") != "user":
@@ -575,19 +711,19 @@ class MinglePlugin(Star):
                 texts = []
             for text in texts:
                 match = re.search(
-                    r"(?:^|\n\n)New batch record IDs: \[\d+(?:, \d+)*\]\. Snapshot ends at record (\d+)\.\n",
+                    r"(?:^|\n\n)New batch record IDs: \[(?:\d+(?:, \d+)*)?\]\. Snapshot ends at record (\d+)\.\n",
                     text,
                 )
                 if match:
                     cursor = max(cursor, int(match.group(1)))
-        if not saved:
+        if not saved or (not cursor and not batch_ids):
             initial = await self.history.get(
                 event.unified_msg_origin,
                 limit=self.settings.initial_context_messages,
-                before_id=max(batch_ids) + 1,
+                before_id=snapshot_end + 1,
                 boundary=boundary_group(event),
             )
-            if not event.get_extra("mingle_woke_from_sleep", False):
+            if not batch_ids or not event.get_extra("mingle_woke_from_sleep", False):
                 return initial
             # A wake batch can exceed the initial context window. Include its
             # oldest waiting input as well, while respecting the group boundary.
@@ -597,14 +733,15 @@ class MinglePlugin(Star):
             cursor = first_id - 1
         # Existing native conversations have no Mingle snapshot; start at this batch.
         if saved:
-            cursor = cursor or min(batch_ids) - 1
+            if not cursor and batch_ids:
+                cursor = min(batch_ids) - 1
         records = []
         while True:
             page = await self.history.get(
                 event.unified_msg_origin,
                 limit=100,
                 after_id=cursor,
-                before_id=max(batch_ids) + 1,
+                before_id=snapshot_end + 1,
                 boundary=boundary_group(event),
             )
             records.extend(page)

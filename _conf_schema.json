@@ -258,7 +258,7 @@
   "experimental": {
     "type": "object",
     "description": "实验功能",
-    "hint": "并行判断使用相同输入，等待全部结果后投票，平票随机。请求数须为正整数，1 为单次判断；增大数值会增加请求量和费用。",
+    "hint": "包含判别器并行请求与随机冒泡。并行请求及主动冒泡都会增加模型调用量。",
     "items": {
       "judge_parallel_requests": {
         "type": "int",
@@ -271,6 +271,30 @@
         "default": 1,
         "description": "判别器并行请求数（睡眠唤醒时）",
         "hint": "用于 @ 或关键词唤醒后的首批判断，以及睡眠积压消息的定时检查。投票规则与清醒时相同。"
+      },
+      "random_bubble_enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "随机冒泡",
+        "hint": "在已启用的共享群会话中主动发言，默认关闭。自然睡眠及手动 /s 均不阻止冒泡；触发时积压消息直接作为 Agent 参考，无需判别器。普通回复、积压回复及图片发送成功后均重新计时。"
+      },
+      "random_bubble_min_minutes": {
+        "type": "float",
+        "default": 30,
+        "description": "冒泡最短间隔（分钟）",
+        "hint": "从最后一次 Agent 成功发送开始计时，等待此时长后，再叠加指数分布的随机等待。重启后重新计时，不补发错过的机会。"
+      },
+      "random_bubble_mean_minutes": {
+        "type": "float",
+        "default": 120,
+        "description": "冒泡平均间隔（分钟）",
+        "hint": "必须大于最短间隔。随机等待的均值为两者之差；实际触发还会等待当前 Agent 完成，并被期间成功发送的消息重新计时。"
+      },
+      "random_bubble_prompt": {
+        "type": "text",
+        "default": "This is a proactive group-chat turn, not a request to answer the backlog. The chat records below are reference material only: you do not have to reply to them, answer each message, or resume an old topic. Take the initiative and send a natural message in your configured persona through send_message_to_user in the current chat. Choose your topic freely: start a conversation, share a thought, make a playful remark, simply act cute, or check the time and say hello. Do not mention timers, backlog processing, or internal scheduling. Follow the normal sending and completion protocol, ending with exactly <finished> after sending.",
+        "description": "冒泡提示词",
+        "hint": "仅用于随机冒泡，覆盖默认英文提示词。聊天记录自动附在其后，通用生成器提示词仍然生效；留空不添加冒泡专用指令。"
       }
     }
   }

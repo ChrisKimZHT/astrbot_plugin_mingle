@@ -1,6 +1,8 @@
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from random import expovariate
 from time import monotonic
 
 from astrbot.api.event import AstrMessageEvent
@@ -17,6 +19,8 @@ class PendingMessage:
     Only the newest ticket in an admitted batch receives record IDs via ready;
     the others receive None. The admitted handler sets finished after its entire
     pipeline unwinds, including framework history saving.
+    Internal proactive tickets use record_id=0 without creating a stored row;
+    their ready future contains only the real backlog record IDs.
     """
 
     event: AstrMessageEvent
@@ -61,6 +65,7 @@ class SessionState:
     pending/judging and appends to approved; execution drains approved and owns
     active/active_ids. A stop decision may discard approved tickets. changed
     wakes judgment when arrivals or Agent transitions affect its deadline.
+    Proactive handlers can reserve the same active slot directly while idle.
 
     State transitions contain no awaits. After IO, workers must recheck any
     live state needed to act on a previously captured Agent or batch.
@@ -80,6 +85,9 @@ class SessionState:
     waking: bool = False
     sleep_revision: int = 0
     next_sleep_backlog_at: float = float("inf")
+    bubble_task: asyncio.Task | None = None
+    next_bubble_at: float = float("inf")
+    bubble_revision: int = 0
     resume_after_rerun: bool = False
     active_ids: list[int] = field(default_factory=list)
     finished: dict[int, str] = field(default_factory=dict)
@@ -94,6 +102,7 @@ class ChatScheduler:
         history: ChatHistory,
         judge: ReplyJudge,
         logger: logging.Logger,
+        queue_bubble: Callable[[str, int], Awaitable[None]] | None = None,
     ) -> None:
         self.settings = settings
         self.history = history
@@ -101,6 +110,177 @@ class ChatScheduler:
         self.logger = logger
         self.sessions: dict[str, SessionState] = {}
         self.closed = False
+        self.queue_bubble = queue_bubble
+
+    def watch_random_bubbles(self, key: str) -> None:
+        """Start one independent random clock for an eligible shared group.
+
+        Args:
+            key: Full group UMO already checked by the plugin entry point.
+        """
+        if self.closed or not self.settings.enabled:
+            return
+        if not self.settings.random_bubble_enabled or self.queue_bubble is None:
+            return
+        state = self.sessions.setdefault(key, SessionState())
+        if state.bubble_task is not None and not state.bubble_task.done():
+            return
+        self._reset_bubble_deadline(state)
+        state.bubble_task = asyncio.create_task(self._random_bubbles(key, state))
+
+    async def stop_random_bubbles(self, key: str) -> None:
+        """Invalidate queued triggers and stop a removed group's owned timer.
+
+        Args:
+            key: Shared-group UMO removed from the allowlist.
+        """
+        state = self.sessions.get(key)
+        if state is None:
+            return
+        state.bubble_revision += 1
+        state.next_bubble_at = float("inf")
+        state.changed.set()
+        if state.bubble_task is not None:
+            state.bubble_task.cancel()
+            await asyncio.gather(state.bubble_task, return_exceptions=True)
+            state.bubble_task = None
+
+    def _reset_bubble_deadline(self, state: SessionState) -> None:
+        """Draw a shifted exponential deadline anchored to the last real send.
+
+        Args:
+            state: Session whose previous queued trigger must become stale.
+        """
+        minimum = self.settings.random_bubble_min_minutes * 60
+        random_mean = (
+            self.settings.random_bubble_mean_minutes
+            - self.settings.random_bubble_min_minutes
+        ) * 60
+        state.bubble_revision += 1
+        state.next_bubble_at = (
+            state.last_agent_reply_at + minimum + expovariate(1 / random_mean)
+        )
+        state.changed.set()
+
+    async def _random_bubbles(self, key: str, state: SessionState) -> None:
+        """Queue at most one internal event per sampled opportunity.
+
+        Sending refreshes the deadline, including sends made by backlog turns.
+        A consumed opportunity cannot spin if dispatch or the Agent fails.
+
+        Args:
+            key: Group receiving proactive opportunities.
+            state: Shared scheduling state, unaffected by sleep transitions.
+        """
+        while not self.closed and self.settings.random_bubble_enabled:
+            state.changed.clear()
+            if not self.settings.enabled or state.next_bubble_at == float("inf"):
+                await state.changed.wait()
+                continue
+            deadline = max(
+                state.next_bubble_at,
+                state.last_agent_finished_at + self.settings.cooldown_seconds,
+            )
+            delay = deadline - monotonic()
+            if delay > 0:
+                try:
+                    await asyncio.wait_for(state.changed.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            if state.active is not None or state.approved or state.judging:
+                await state.changed.wait()
+                continue
+            # Consume before dispatch. A later successful send schedules the
+            # next opportunity and invalidates this event's revision.
+            revision = state.bubble_revision
+            state.next_bubble_at = float("inf")
+            try:
+                await self.queue_bubble(key, revision)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.exception("Failed to queue Mingle random bubble: %s", key)
+
+    async def admit_random_bubble(
+        self, event: AstrMessageEvent, revision: int
+    ) -> PendingMessage | None:
+        """Claim bounded pending input without judgment once ordinary work is idle.
+
+        Args:
+            event: Fresh internal event, never inserted into chat storage.
+            revision: Clock generation captured when the event was queued.
+
+        Returns:
+            Active ticket with its backlog IDs, or None for a stale trigger.
+        """
+        key = event.unified_msg_origin
+        state = self.sessions.get(key)
+        if state is None:
+            return None
+        while not self.closed and self.settings.enabled:
+            if not self.settings.random_bubble_enabled:
+                return None
+            if revision != state.bubble_revision or event.is_stopped():
+                return None
+            state.changed.clear()
+            if state.active is not None or state.approved or state.judging:
+                await state.changed.wait()
+                continue
+            cooldown_delay = (
+                state.last_agent_finished_at
+                + self.settings.cooldown_seconds
+                - monotonic()
+            )
+            if cooldown_delay > 0:
+                try:
+                    await asyncio.wait_for(state.changed.wait(), timeout=cooldown_delay)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            self._check_sleep(key, state)
+            waiting = _waiting_messages(state.pending)
+            record_ids = [item.record_id for item in waiting]
+            state.pending = []
+            state.waking = False
+            state.resume_after_rerun = False
+            for item in waiting:
+                item.release()
+            ticket = PendingMessage(
+                event,
+                0,
+                False,
+                asyncio.get_running_loop().create_future(),
+                monotonic(),
+                backlog_sleep_revision=state.sleep_revision,
+            )
+            state.active = ticket
+            state.active_ids = record_ids
+            event.set_extra("mingle_woke_from_sleep", True)
+            ticket.ready.set_result(record_ids)
+            state.changed.set()
+            return ticket
+        return None
+
+    def finish_random_bubble(self, ticket: PendingMessage) -> None:
+        """Release a proactive turn only after its complete pipeline unwinds.
+
+        Args:
+            ticket: Internal event's active ticket, including claimed backlog.
+        """
+        state = self.sessions.get(ticket.event.unified_msg_origin)
+        if state is None or state.active is not ticket:
+            return
+        interrupted = ticket.event.get_extra(
+            "agent_user_aborted", False
+        ) or ticket.event.get_extra("agent_stop_requested", False)
+        outcome = "interrupted" if interrupted else "completed"
+        self._finish_records(state, state.active_ids, outcome)
+        if ticket.event.get_extra("mingle_agent_started", False):
+            state.last_agent_finished_at = monotonic()
+        state.active = None
+        state.active_ids = []
+        state.changed.set()
 
     def sleep(self, key: str) -> None:
         """Retain waiting work for a wake or timed review, preserving the active turn.
@@ -146,6 +326,8 @@ class ChatScheduler:
             return
         state = self.sessions.setdefault(key, SessionState())
         state.last_agent_reply_at = monotonic()
+        if state.bubble_task is not None:
+            self._reset_bubble_deadline(state)
         if not state.sleeping:
             state.changed.set()
             return
@@ -365,6 +547,7 @@ class ChatScheduler:
                     len(state.active_ids),
                 )
                 batch = []
+                state.changed.set()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -632,6 +815,13 @@ class ChatScheduler:
         batch: list[PendingMessage] = []
         try:
             while state.approved and not self.closed:
+                # A proactive turn owns the same execution slot, but its event
+                # handler releases it after the normal pipeline saves history.
+                while state.active is not None and not self.closed:
+                    state.changed.clear()
+                    await state.changed.wait()
+                if self.closed:
+                    break
                 self._check_sleep(key, state)
                 if state.sleeping and not state.approved:
                     break
@@ -688,8 +878,10 @@ class ChatScheduler:
             for item in batch + state.approved:
                 item.release()
             state.approved.clear()
-            state.active = None
-            state.active_ids = []
+            if any(state.active is item for item in batch):
+                state.active = None
+                state.active_ids = []
+            state.changed.set()
 
     def _finish_records(
         self, state: SessionState, record_ids: list[int], outcome: str
@@ -715,6 +907,9 @@ class ChatScheduler:
         self.closed = True
         tasks = []
         for state in self.sessions.values():
+            if state.bubble_task is not None:
+                state.bubble_task.cancel()
+                tasks.append(state.bubble_task)
             if state.active is not None:
                 state.active.event.set_extra("agent_stop_requested", True)
                 state.active.event.stop_event()

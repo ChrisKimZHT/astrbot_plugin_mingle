@@ -23,8 +23,8 @@ from astrbot.core.star.filter.command import CommandFilter
 from mingle_tests_plugin.main import MinglePlugin
 from mingle_tests_plugin.src.debug import DebugDumper
 from mingle_tests_plugin.src.decision import ReplyJudge
-from mingle_tests_plugin.src.history import ChatHistory
-from mingle_tests_plugin.src.scheduler import ChatScheduler
+from mingle_tests_plugin.src.history import ChatHistory, boundary_group
+from mingle_tests_plugin.src.scheduler import ChatScheduler, SessionState
 from mingle_tests_plugin.src.settings import Settings
 from mingle_tests_plugin.src.utils.history_formatting import format_prompt_history
 
@@ -105,6 +105,7 @@ async def plugin(tmp_path, monkeypatch):
     instance.available = True
     instance.cleanup_task = None
     instance.handlers = set()
+    instance.bubble_self_ids = {}
     yield instance
     await instance.terminate()
 
@@ -123,6 +124,315 @@ async def test_private_and_mentions_bypass_judgment_and_bind_conversation(plugin
         assert event.get_extra("enable_streaming") is False
         await handler.aclose()
     plugin.context.llm_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backlog_count", [0, 4])
+async def test_random_bubble_timer_enters_agent_with_reference_backlog(
+    plugin, monkeypatch, backlog_count
+):
+    from mcp.types import CallToolResult, TextContent
+    from mingle_tests_plugin.main import RandomBubbleEvent
+
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+    )
+    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.expovariate", lambda _: 5400)
+    plugin.settings = replace(
+        plugin.settings,
+        random_bubble_enabled=True,
+        initial_context_messages=1,
+        sleep_backlog_minutes=0,
+    )
+    plugin.scheduler.settings = plugin.settings
+    plugin.scheduler.queue_bubble = plugin._queue_random_bubble
+    event_queue = asyncio.Queue()
+    source = make_event()
+    plugin.context.get_event_queue = lambda: event_queue
+    plugin.context.get_platform_inst = lambda _: SimpleNamespace(
+        meta=lambda: source.platform_meta
+    )
+    key = source.unified_msg_origin
+    plugin.scheduler.watch_random_bubbles(key)
+    # Manual sleep must not postpone the already sampled proactive opportunity.
+    plugin.scheduler.sleep(key)
+    state = plugin.scheduler.sessions[key]
+    deadline = state.next_bubble_at
+    handlers = [plugin.on_message(make_event(str(n))) for n in range(backlog_count)]
+    waiting = [asyncio.create_task(anext(handler, None)) for handler in handlers]
+    bubble_handler = None
+    try:
+        for _ in range(100):
+            if len(state.pending) == backlog_count:
+                break
+            await asyncio.sleep(0.001)
+        assert len(state.pending) == backlog_count
+        assert state.next_bubble_at == deadline
+        clock.now = deadline + 1
+        state.changed.set()
+        bubble = await asyncio.wait_for(event_queue.get(), 1)
+        assert isinstance(bubble, RandomBubbleEvent)
+        assert bubble.unified_msg_origin == key
+        assert bubble.role == "member"
+        assert not bubble.get_extra("agent_stop_requested", False)
+        bubble_handler = plugin.on_message(bubble)
+        request = await asyncio.wait_for(anext(bubble_handler), 1)
+        assert isinstance(request, ProviderRequest)
+        assert request.prompt.startswith(plugin.settings.random_bubble_prompt + "\n\n")
+        assert "reference material only" in request.prompt
+        assert "act cute" in request.prompt
+        assert "send_message_to_user" in request.prompt
+        rows = json.loads(request.prompt.rsplit("\n", 1)[1])
+        assert [row["text"] for row in rows] == [
+            f"message {n}" for n in range(backlog_count)
+        ]
+        assert request.contexts == []
+        assert bubble.get_extra("enable_streaming") is False
+        assert len(state.active_ids) == backlog_count
+        assert state.sleeping
+        plugin.context.llm_generate.assert_not_awaited()
+        assert await asyncio.gather(*waiting) == [None] * backlog_count
+        assert len(await plugin.history.get(key)) == backlog_count
+        # A real send resets the random clock and wakes a matching sleep revision.
+        revision = state.bubble_revision
+        await plugin.track_agent_reply(
+            bubble,
+            SimpleNamespace(name="send_message_to_user"),
+            {},
+            CallToolResult(
+                content=[
+                    TextContent(type="text", text=f"Message sent to session {key}")
+                ]
+            ),
+        )
+        assert state.last_agent_reply_at == clock.now
+        assert state.next_bubble_at == clock.now + 7200
+        assert state.bubble_revision == revision + 1
+        assert not state.sleeping
+        # Persist an empty-ID snapshot as well, so later turns can resume it.
+        conversation = request.conversation
+        conversation.history = json.dumps([{"role": "user", "content": request.prompt}])
+        after = make_event("after")
+        after_id = await plugin.history.record(after, after.get_messages())
+        recent = await plugin._agent_prompt_history(after, conversation, [after_id])
+        assert [row["text"] for row in recent] == ["message after"]
+    finally:
+        if bubble_handler is not None:
+            await bubble_handler.aclose()
+        for task in waiting:
+            task.cancel()
+        await asyncio.gather(*waiting, return_exceptions=True)
+        for handler in handlers:
+            await handler.aclose()
+    assert state.active is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["  Start {topic} playfully.\n\t", ""])
+async def test_random_bubble_uses_configured_prompt_verbatim_only_for_proactive_turns(
+    plugin, text
+):
+    from astrbot.core.platform.message_session import MessageSession
+    from mingle_tests_plugin.main import RandomBubbleEvent
+
+    plugin.settings = replace(
+        plugin.settings, random_bubble_enabled=True, random_bubble_prompt=text
+    )
+    plugin.scheduler.settings = plugin.settings
+    source = make_event()
+    key = source.unified_msg_origin
+    plugin.scheduler.sessions[key] = SessionState()
+    bubble = RandomBubbleEvent(
+        plugin.context, MessageSession.from_str(key), source.platform_meta, 0
+    )
+    handler = plugin.on_message(bubble)
+    try:
+        request = await asyncio.wait_for(anext(handler), 1)
+        assert request.prompt == (
+            text + "\n\nNew batch record IDs: []. Snapshot ends at record 0.\n[]"
+        )
+    finally:
+        await handler.aclose()
+    ordinary = make_event("ordinary")
+    ordinary.is_at_or_wake_command = True
+    handler = plugin.on_message(ordinary)
+    try:
+        request = await asyncio.wait_for(anext(handler), 1)
+        assert request.prompt.startswith("New batch record IDs: [")
+    finally:
+        await handler.aclose()
+
+
+@pytest.mark.asyncio
+async def test_random_bubble_respects_group_boundary_and_stale_trigger(plugin):
+    from astrbot.core.platform.message_session import MessageSession
+    from mingle_tests_plugin.main import RandomBubbleEvent
+
+    plugin.settings = replace(plugin.settings, random_bubble_enabled=True)
+    plugin.scheduler.settings = plugin.settings
+    source = make_event("before")
+    key = source.unified_msg_origin
+    await plugin.history.record(source, source.get_messages())
+    await plugin.history.set_boundary(boundary_group(source))
+    after = make_event("after")
+    await plugin.history.record(after, after.get_messages())
+    plugin.scheduler.sessions[key] = SessionState()
+    state = plugin.scheduler.sessions[key]
+    bubble = RandomBubbleEvent(
+        plugin.context, MessageSession.from_str(key), source.platform_meta, 0
+    )
+    handler = plugin.on_message(bubble)
+    request = await anext(handler)
+    rows = json.loads(request.prompt.rsplit("\n", 1)[1])
+    assert [row["text"] for row in rows] == ["message after"]
+    await handler.aclose()
+    state.bubble_revision += 1
+    stale = RandomBubbleEvent(
+        plugin.context, MessageSession.from_str(key), source.platform_meta, 0
+    )
+    assert [request async for request in plugin.on_message(stale)] == []
+    assert stale.is_stopped()
+    plugin.context.llm_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_random_bubble_pipeline_saves_before_normal_followup(plugin):
+    from astrbot.core.platform.message_session import MessageSession
+    from mcp.types import CallToolResult, TextContent
+    from mingle_tests_plugin.main import RandomBubbleEvent
+
+    plugin.settings = replace(plugin.settings, random_bubble_enabled=True)
+    plugin.scheduler.settings = plugin.settings
+    plugin.context.llm_generate.return_value.completion_text = '{"should_reply": true}'
+    source = make_event()
+    key = source.unified_msg_origin
+    plugin.scheduler.sessions[key] = SessionState()
+    bubble = RandomBubbleEvent(
+        plugin.context, MessageSession.from_str(key), source.platform_meta, 0
+    )
+    started, finish = asyncio.Event(), asyncio.Event()
+    requests, saved = [], []
+
+    class PluginDispatch:
+        async def process(self, event):
+            async for value in call_handler(event, plugin.on_message):
+                yield value
+
+    class Agent:
+        async def process(self, event):
+            requests.append(event.get_extra("provider_request"))
+            if event is bubble:
+                await plugin.track_agent_reply(
+                    event,
+                    SimpleNamespace(name="send_message_to_user"),
+                    {},
+                    CallToolResult(
+                        content=[
+                            TextContent(
+                                type="text", text=f"Message sent to session {key}"
+                            )
+                        ]
+                    ),
+                )
+                started.set()
+                await finish.wait()
+            else:
+                assert saved == [bubble.message_obj.message_id]
+            event.set_result(event.plain_result("<finished>"))
+            yield
+            saved.append(event.message_obj.message_id)
+
+    process = ProcessStage()
+    process.ctx = SimpleNamespace(
+        astrbot_config={"provider_settings": {"enable": True}}
+    )
+    process.star_request_sub_stage = PluginDispatch()
+    process.agent_sub_stage = Agent()
+    pipeline = object.__new__(PipelineScheduler)
+    pipeline.stages = [process]
+    followup = make_event("followup")
+    for event in (bubble, followup):
+        event.set_extra("activated_handlers", [SimpleNamespace(event_filters=[])])
+    tasks = [asyncio.create_task(pipeline._process_stages(bubble))]
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        tasks.append(asyncio.create_task(pipeline._process_stages(followup)))
+        for _ in range(100):
+            if plugin.scheduler.sessions[key].approved:
+                break
+            await asyncio.sleep(0.001)
+        assert plugin.scheduler.sessions[key].approved
+        assert len(requests) == 1
+        assert plugin.scheduler.sessions[key].active.event is bubble
+        finish.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), 2)
+        assert len(requests) == 2
+        assert saved == [bubble.message_obj.message_id, "followup"]
+        rows = await plugin.history.get(key)
+        assert [row["text"] for row in rows] == ["message followup"]
+    finally:
+        finish.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_timed_backlog_send_resets_random_bubble_clock(plugin, monkeypatch):
+    from mcp.types import CallToolResult, TextContent
+
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+    )
+    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.expovariate", lambda _: 5400)
+    plugin.settings = replace(plugin.settings, random_bubble_enabled=True)
+    plugin.scheduler.settings = plugin.settings
+    plugin.scheduler.queue_bubble = AsyncMock()
+    plugin.context.llm_generate.return_value.completion_text = '{"should_reply": true}'
+    event = make_event()
+    key = event.unified_msg_origin
+    plugin.scheduler.watch_random_bubbles(key)
+    plugin.scheduler.sleep(key)
+    state = plugin.scheduler.sessions[key]
+    handler = plugin.on_message(event)
+    task = asyncio.create_task(anext(handler))
+    try:
+        for _ in range(100):
+            if state.pending:
+                break
+            await asyncio.sleep(0.001)
+        assert state.pending
+        assert state.next_bubble_at == 7300
+        revision = state.bubble_revision
+        clock.now = 1900
+        state.changed.set()
+        assert isinstance(await asyncio.wait_for(task, 1), ProviderRequest)
+        assert plugin.context.llm_generate.await_count == 1
+        assert state.sleeping
+        await plugin.track_agent_reply(
+            event,
+            SimpleNamespace(name="send_message_to_user"),
+            {},
+            CallToolResult(
+                content=[
+                    TextContent(type="text", text=f"Message sent to session {key}")
+                ]
+            ),
+        )
+        assert not state.sleeping
+        assert state.last_agent_reply_at == 1900
+        assert state.next_bubble_at == 9100
+        assert state.bubble_revision == revision + 1
+        assert (
+            await plugin.scheduler.admit_random_bubble(make_event(), revision) is None
+        )
+        plugin.scheduler.queue_bubble.assert_not_awaited()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await handler.aclose()
 
 
 @pytest.mark.asyncio

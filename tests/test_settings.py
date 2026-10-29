@@ -41,6 +41,14 @@ from mingle_tests_plugin.src.settings import Settings
         {"toolbox": {"toolbox_random_enabled": "false"}},
         {"toolbox": {"toolbox_image_generate_enabled": "true"}},
         {"mingle_generate_image": {"toolbox_image_generate_provider_id": 1}},
+        {"experimental": {"random_bubble_enabled": "true"}},
+        {"experimental": {"random_bubble_min_minutes": -1}},
+        {"experimental": {"random_bubble_min_minutes": True}},
+        {"experimental": {"random_bubble_mean_minutes": float("nan")}},
+        {"experimental": {"random_bubble_mean_minutes": float("inf")}},
+        {"experimental": {"random_bubble_mean_minutes": 30}},
+        {"experimental": {"random_bubble_prompt": None}},
+        {"experimental": {"random_bubble_prompt": 123}},
     ],
 )
 def test_invalid_settings_fail_at_startup(config):
@@ -160,3 +168,23 @@ def test_parallel_request_count_configuration():
     )
     assert settings.judge_parallel_requests == 5
     assert settings.judge_wake_parallel_requests == 3
+
+
+def test_random_bubble_configuration():
+    assert not Settings().random_bubble_enabled
+    assert Settings().random_bubble_min_minutes == 30
+    assert Settings().random_bubble_mean_minutes == 120
+    settings = Settings.from_config(
+        {
+            "experimental": {
+                "random_bubble_enabled": True,
+                "random_bubble_min_minutes": 10,
+                "random_bubble_mean_minutes": 60,
+                "random_bubble_prompt": "Custom proactive prompt",
+            }
+        }
+    )
+    assert settings.random_bubble_enabled
+    assert settings.random_bubble_min_minutes == 10
+    assert settings.random_bubble_mean_minutes == 60
+    assert settings.random_bubble_prompt == "Custom proactive prompt"

@@ -1,12 +1,183 @@
 import asyncio
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from mingle_tests_plugin.src.decision import ReplyDecision
 from mingle_tests_plugin.src.scheduler import ChatScheduler, SessionState
 from mingle_tests_plugin.src.settings import Settings
+
+
+@pytest.mark.asyncio
+async def test_bubble_clock_tracks_actual_sends_not_sleep_or_arrivals(monkeypatch):
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+    )
+    sample = AsyncMock()
+    draw = Mock(return_value=5400)
+    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.expovariate", draw)
+    scheduler = ChatScheduler(
+        Settings(random_bubble_enabled=True, sleep_backlog_minutes=0),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        SimpleNamespace(should_reply=AsyncMock(return_value=False)),
+        logging.getLogger(),
+        queue_bubble=sample,
+    )
+    try:
+        scheduler.watch_random_bubbles("group")
+        state = scheduler.sessions["group"]
+        assert state.next_bubble_at == 100 + 1800 + 5400
+        draw.assert_called_once_with(1 / 5400)
+        first_task = state.bubble_task
+        scheduler.watch_random_bubbles("group")
+        assert state.bubble_task is first_task
+        scheduler.sleep("group")
+        ticket = await scheduler.submit(Event(), 1, False)
+        assert state.next_bubble_at == 7300
+        clock.now = 200
+        scheduler.record_agent_reply("group")
+        assert state.last_agent_reply_at == 200
+        assert state.next_bubble_at == 7400
+        assert state.sleeping
+        assert not ticket.ready.done()
+        assert await scheduler.admit_random_bubble(Event(), 1) is None
+    finally:
+        await scheduler.close()
+    assert first_task.cancelled()
+    assert await ticket.ready is None
+
+
+@pytest.mark.asyncio
+async def test_bubble_timer_consumes_once_and_reschedules_only_on_send(monkeypatch):
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+    )
+    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.expovariate", lambda _: 10)
+    queue = asyncio.Queue()
+
+    async def enqueue(key, revision):
+        await queue.put((key, revision))
+
+    scheduler = ChatScheduler(
+        Settings(random_bubble_enabled=True, random_bubble_min_minutes=0),
+        None,
+        None,
+        logging.getLogger(),
+        queue_bubble=enqueue,
+    )
+    try:
+        scheduler.watch_random_bubbles("group")
+        state = scheduler.sessions["group"]
+        scheduler.sleep("group")
+        clock.now = 111
+        state.changed.set()
+        assert await asyncio.wait_for(queue.get(), 1) == ("group", 1)
+        assert state.next_bubble_at == float("inf")
+        state.changed.set()
+        await asyncio.sleep(0)
+        assert queue.empty()
+        scheduler.record_agent_reply("group")
+        assert state.next_bubble_at == 121
+        clock.now = 122
+        state.changed.set()
+        assert await asyncio.wait_for(queue.get(), 1) == ("group", 2)
+    finally:
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_bubble_claims_sleeping_backlog_and_serializes_followups():
+    scheduler = ChatScheduler(
+        Settings(
+            random_bubble_enabled=True,
+            sleep_backlog_minutes=0,
+            debounce_seconds=0,
+            cooldown_seconds=0,
+        ),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        SimpleNamespace(evaluate=AsyncMock(return_value=ReplyDecision(True))),
+        logging.getLogger(),
+    )
+    try:
+        scheduler.sleep("group")
+        backlog = [
+            await scheduler.submit(Event(), record_id, False) for record_id in (1, 2, 3)
+        ]
+        state = scheduler.sessions["group"]
+        bubble = await scheduler.admit_random_bubble(Event(), state.bubble_revision)
+        assert await bubble.ready == [1, 2, 3]
+        assert all(item.ready.result() is None for item in backlog)
+        assert state.active is bubble
+        assert state.active_ids == [1, 2, 3]
+        scheduler.judge.evaluate.assert_not_awaited()
+        scheduler.record_agent_reply("group")
+        assert not state.sleeping
+        following = await scheduler.submit(Event(), 4, False)
+        await asyncio.wait_for(state.judgment_task, 1)
+        assert not following.ready.done()
+        assert state.active is bubble
+        bubble.event.set_extra("mingle_agent_started", True)
+        bubble.finished.set()
+        scheduler.finish_random_bubble(bubble)
+        assert await asyncio.wait_for(following.ready, 1) == [4]
+        assert all(state.finished[record_id] == "completed" for record_id in (1, 2, 3))
+        following.finished.set()
+    finally:
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_queued_bubble_yields_to_normal_reply_and_becomes_stale():
+    scheduler = ChatScheduler(
+        Settings(random_bubble_enabled=True, debounce_seconds=0, cooldown_seconds=0),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        None,
+        logging.getLogger(),
+        queue_bubble=AsyncMock(),
+    )
+    try:
+        scheduler.watch_random_bubbles("group")
+        state = scheduler.sessions["group"]
+        active = await scheduler.submit(Event(), 1, True)
+        await asyncio.wait_for(active.ready, 1)
+        revision = state.bubble_revision
+        waiting = asyncio.create_task(scheduler.admit_random_bubble(Event(), revision))
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        scheduler.record_agent_reply("group")
+        assert await asyncio.wait_for(waiting, 1) is None
+        assert state.active is active
+        active.finished.set()
+    finally:
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_bubble_default_off_and_group_removal_invalidates_timer():
+    scheduler = ChatScheduler(
+        Settings(), None, None, logging.getLogger(), queue_bubble=AsyncMock()
+    )
+    try:
+        scheduler.watch_random_bubbles("group")
+        assert not scheduler.sessions
+        scheduler.settings = Settings(random_bubble_enabled=True)
+        scheduler.watch_random_bubbles("group")
+        state = scheduler.sessions["group"]
+        old_revision = state.bubble_revision
+        old_task = state.bubble_task
+        await scheduler.stop_random_bubbles("group")
+        assert old_task.cancelled()
+        assert state.bubble_task is None
+        assert state.next_bubble_at == float("inf")
+        assert await scheduler.admit_random_bubble(Event(), old_revision) is None
+        scheduler.watch_random_bubbles("group")
+        assert state.bubble_task is not old_task
+        assert state.next_bubble_at < float("inf")
+    finally:
+        await scheduler.close()
 
 
 class Event:

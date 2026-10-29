@@ -36,7 +36,14 @@ CONFIG_GROUPS = {
     "mingle_generate_image": ("toolbox_image_generate_provider_id",),
     "mingle_edit_image": ("toolbox_image_edit_provider_id",),
     "debug": ("debug_sessions",),
-    "experimental": ("judge_parallel_requests", "judge_wake_parallel_requests"),
+    "experimental": (
+        "judge_parallel_requests",
+        "judge_wake_parallel_requests",
+        "random_bubble_enabled",
+        "random_bubble_min_minutes",
+        "random_bubble_mean_minutes",
+        "random_bubble_prompt",
+    ),
 }
 
 DEFAULT_JUDGE_PROMPT = (
@@ -166,6 +173,20 @@ DEFAULT_GENERATOR_PROMPT = (
 )
 
 
+DEFAULT_RANDOM_BUBBLE_PROMPT = (
+    "This is a proactive group-chat turn, not a request to answer the backlog. "
+    "The chat records below are reference material only: you do not have to "
+    "reply to them, answer each message, or resume an old topic. "
+    "Take the initiative and send a natural message in your configured persona "
+    "through send_message_to_user in the current chat. Choose your topic freely: "
+    "start a conversation, share a thought, make a playful remark, simply "
+    "act cute, or check the time and say hello. "
+    "Do not mention timers, backlog processing, or internal scheduling. "
+    "Follow the normal sending and completion protocol, ending with exactly "
+    "<finished> after sending."
+)
+
+
 @dataclass(frozen=True)
 class Settings:
     enabled: bool = True
@@ -177,6 +198,10 @@ class Settings:
     judge_prompt_append: str = ""
     judge_parallel_requests: int = 1
     judge_wake_parallel_requests: int = 1
+    random_bubble_enabled: bool = False
+    random_bubble_min_minutes: float = 30.0
+    random_bubble_mean_minutes: float = 120.0
+    random_bubble_prompt: str = DEFAULT_RANDOM_BUBBLE_PROMPT
     judge_timeout: float = 20.0
     generator_prompt: str = DEFAULT_GENERATOR_PROMPT
     generator_prompt_append: str = ""
@@ -247,6 +272,7 @@ class Settings:
             "toolbox_random_enabled",
             "toolbox_image_generate_enabled",
             "toolbox_image_edit_enabled",
+            "random_bubble_enabled",
         ):
             if not isinstance(getattr(settings, name), bool):
                 raise ValueError(f"{name} must be a boolean")
@@ -257,6 +283,8 @@ class Settings:
             "cooldown_seconds",
             "sleep_minutes",
             "sleep_backlog_minutes",
+            "random_bubble_min_minutes",
+            "random_bubble_mean_minutes",
         ):
             value = getattr(settings, name)
             if (
@@ -292,6 +320,7 @@ class Settings:
             "judge_prompt_append",
             "generator_prompt",
             "generator_prompt_append",
+            "random_bubble_prompt",
             "toolbox_image_generate_provider_id",
             "toolbox_image_edit_provider_id",
         ):
@@ -299,4 +328,8 @@ class Settings:
                 raise ValueError(f"{name} must be a string")
         if settings.initial_context_messages > 100:
             raise ValueError("initial_context_messages must not exceed 100")
+        if settings.random_bubble_mean_minutes <= settings.random_bubble_min_minutes:
+            raise ValueError(
+                "random_bubble_mean_minutes must exceed random_bubble_min_minutes"
+            )
         return settings

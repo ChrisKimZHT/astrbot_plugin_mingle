@@ -421,6 +421,32 @@ be verified separately with configured credentials; tests do not contact them.
   or sessions, retry paid edits automatically, or return images to the model.
 
 - Experimental settings appear in the final experimental (实验功能) group.
+  Random proactive group turns use random_bubble_enabled (default false),
+  random_bubble_min_minutes (30), and random_bubble_mean_minutes (120) here.
+  random_bubble_prompt is configurable in the same experimental group. Keep
+  its English schema default synchronized with DEFAULT_RANDOM_BUBBLE_PROMPT
+  in settings. Use the configured text verbatim, followed by two newlines and
+  the ordinary batch metadata/history; do not trim or interpolate it. Empty
+  text adds no proactive instructions. General generator instructions still
+  apply, and ordinary non-proactive turns do not use this prompt.
+  Draw minimum plus an exponential wait whose mean is mean minus minimum,
+  anchored to the last successful managed current-session send, including
+  timed backlog replies and image sends. Restart grants a fresh window.
+  Both natural and manual sleep permit proactive turns. Use fresh internal
+  events through the normal pipeline, never replay incoming events or store
+  synthetic user rows. Keep one Agent per full shared-group UMO, let ordinary
+  approved work finish first, and reject queued triggers after a newer send.
+  Proactive admission directly claims bounded pending tickets without judgment;
+  include the full claimed backlog even for an empty conversation, respecting
+  history boundaries and snapshot cursors. The English user notice explicitly
+  makes backlog reference-only and requires a freely chosen proactive message
+  in persona, including playful or cute remarks, through native sending tools.
+  Consume each opportunity once; failed or unsent attempts do not refresh the
+  last-send clock or trigger immediate retries. A successful proactive send can
+  wake the session under the same sleep-revision guard as backlog sends.
+  Cancel owned timers on unload. Private and isolated member sessions are not
+  proactive targets; bare group IDs become targets after an inbound message
+  supplies their platform identity.
   judge_parallel_requests controls awake judgments; judge_wake_parallel_requests
   controls the batch that wakes a sleeping session. Both are positive integers,
   default 1, under experimental. Pass the scheduler's captured waking flag to
