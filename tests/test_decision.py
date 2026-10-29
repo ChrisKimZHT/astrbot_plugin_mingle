@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 import logging
@@ -360,3 +361,137 @@ async def test_time_context_without_previous_message(context, event, messages, n
     assert payload["time_context"].endswith(
         "unknown (no valid message timestamp before new messages)"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "votes,expected,choices",
+    [
+        (
+            [(True, "rerun")] * 2 + [(False, "wait")] * 2 + [(False, "stop")],
+            ReplyDecision(False, "wait"),
+            [[False], ["wait"]],
+        ),
+        (
+            [(False, "stop")] * 2 + [(True, "wait")] * 2 + [(True, "rerun")],
+            ReplyDecision(True, "wait"),
+            [[True], ["wait"]],
+        ),
+        (
+            [(True, "rerun"), (False, "wait")],
+            ReplyDecision(True, "rerun"),
+            [[True, False], ["rerun", "wait"]],
+        ),
+        (
+            [(True, "wait"), (False, "stop"), (False, "stop")],
+            ReplyDecision(False, "stop"),
+            [[False], ["stop"]],
+        ),
+    ],
+)
+async def test_parallel_two_level_vote(
+    context, event, monkeypatch, votes, expected, choices
+):
+    selected = []
+
+    def choose(values):
+        selected.append(values)
+        return values[0]
+
+    monkeypatch.setattr("mingle_tests_plugin.src.decision.random.choice", choose)
+    context.llm_generate.side_effect = [
+        SimpleNamespace(
+            completion_text=json.dumps({"should_reply": reply, "action": action})
+        )
+        for reply, action in votes
+    ]
+    judge = ReplyJudge(
+        context, Settings(judge_parallel_requests=len(votes)), logging.getLogger()
+    )
+    assert await judge.evaluate(event, []) == expected
+    assert selected == choices
+    assert context.llm_generate.await_count == len(votes)
+    assert all(
+        call == context.llm_generate.call_args_list[0]
+        for call in context.llm_generate.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_parallel_requests_overlap_and_have_distinct_debug_ids(context, event):
+    started = 0
+    ready = asyncio.Event()
+
+    async def generate(**kwargs):
+        nonlocal started
+        started += 1
+        if started == 3:
+            ready.set()
+        await ready.wait()
+        return SimpleNamespace(completion_text='{"should_reply": true}')
+
+    context.llm_generate.side_effect = generate
+    debug = SimpleNamespace(dump=AsyncMock())
+    judge = ReplyJudge(
+        context, Settings(judge_parallel_requests=3), logging.getLogger(), debug
+    )
+    assert (await asyncio.wait_for(judge.evaluate(event, []), 2)).should_reply
+    calls = debug.dump.call_args_list
+    inputs = [call.args for call in calls if call.args[2] == "input"]
+    outputs = [call.args for call in calls if call.args[2] == "output"]
+    assert len(inputs) == len(outputs) == 3
+    assert len({args[4] for args in inputs}) == 3
+    assert {args[4] for args in inputs} == {args[4] for args in outputs}
+    assert all(args[3] == inputs[0][3] for args in inputs)
+
+
+@pytest.mark.asyncio
+async def test_parallel_failures_and_timeouts_vote_silent(context, event):
+    async def generate(**kwargs):
+        index = context.llm_generate.await_count
+        if index == 1:
+            return SimpleNamespace(
+                completion_text='{"should_reply": true, "action": "rerun"}'
+            )
+        if index == 2:
+            raise RuntimeError("unavailable")
+        if index == 3:
+            return SimpleNamespace(completion_text="invalid")
+        await asyncio.Event().wait()
+
+    context.llm_generate.side_effect = generate
+    judge = ReplyJudge(
+        context,
+        Settings(judge_parallel_requests=4, judge_timeout=0.02),
+        logging.getLogger(),
+    )
+    assert await judge.evaluate(event, []) == ReplyDecision()
+    assert context.llm_generate.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_parallel_cancellation_cancels_all_requests(context, event):
+    started = 0
+    cancelled = 0
+    ready = asyncio.Event()
+
+    async def generate(**kwargs):
+        nonlocal started, cancelled
+        started += 1
+        if started == 3:
+            ready.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled += 1
+
+    context.llm_generate.side_effect = generate
+    judge = ReplyJudge(
+        context, Settings(judge_parallel_requests=3), logging.getLogger()
+    )
+    task = asyncio.create_task(judge.evaluate(event, []))
+    await asyncio.wait_for(ready.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled == 3

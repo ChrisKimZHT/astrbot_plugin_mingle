@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import math
+import random
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
@@ -83,7 +85,6 @@ class ReplyJudge:
             A validated reply and interruption decision. Failures and malformed
             responses never request interruption.
         """
-        request_id = None
         try:
             provider_id = self.settings.judge_provider_id
             if not provider_id:
@@ -191,6 +192,75 @@ class ReplyJudge:
                 len(judgment_messages),
                 len(new_ids),
             )
+            decisions = await asyncio.gather(
+                *(
+                    self._evaluate_request(event, provider_id, prompt, system_prompt)
+                    for _ in range(self.settings.judge_parallel_requests)
+                )
+            )
+            if len(decisions) == 1:
+                return decisions[0]
+            # Vote on reply admission first, then exclude incompatible actions.
+            reply_votes = Counter(decision.should_reply for decision in decisions)
+            should_reply = random.choice(
+                [
+                    value
+                    for value, count in reply_votes.items()
+                    if count == max(reply_votes.values())
+                ]
+            )
+            allowed_actions = {"wait", "rerun" if should_reply else "stop"}
+            action_votes = Counter(
+                decision.action
+                for decision in decisions
+                if decision.action in allowed_actions
+            )
+            action = random.choice(
+                [
+                    value
+                    for value, count in action_votes.items()
+                    if count == max(action_votes.values())
+                ]
+            )
+            self.logger.info(
+                "Mingle judgment vote for session %s: requests=%d, reply_votes=%s, "
+                "action_votes=%s, should_reply=%s, action=%s",
+                event.unified_msg_origin,
+                len(decisions),
+                dict(reply_votes),
+                dict(action_votes),
+                should_reply,
+                action,
+            )
+            return ReplyDecision(should_reply=should_reply, action=action)
+        except Exception:
+            self.logger.warning(
+                "Reply judgment preparation failed for session %s",
+                event.unified_msg_origin,
+                exc_info=True,
+            )
+            return ReplyDecision()
+
+    async def _evaluate_request(
+        self,
+        event: AstrMessageEvent,
+        provider_id: str,
+        prompt: str,
+        system_prompt: str,
+    ) -> ReplyDecision:
+        """Run and validate one independently timed and debugged judgment request.
+
+        Args:
+            event: Event identifying the debug session.
+            provider_id: Resolved provider shared by this judgment's requests.
+            prompt: Exact serialized user input shared by all requests.
+            system_prompt: Resolved instructions and persona.
+
+        Returns:
+            A validated decision, or a silent wait on failure.
+        """
+        request_id = None
+        try:
             request_id = uuid.uuid4().hex
             if self.debug is not None:
                 await self.debug.dump(

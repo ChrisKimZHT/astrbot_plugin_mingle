@@ -56,10 +56,11 @@ def test_schema_defaults_match_runtime_settings(tmp_path):
         "generator",
         "history",
         "images",
-        "debug",
         "toolbox",
         "mingle_generate_image",
         "mingle_edit_image",
+        "debug",
+        "experimental",
     ]
     assert Settings.from_config(
         {"general": {"group_sessions": ["  group  ", ""]}}
@@ -102,4 +103,20 @@ def test_grouped_settings_load_custom_values():
         toolbox_enabled=False,
         toolbox_time_enabled=False,
         toolbox_image_generate_provider_id="image-provider",
+    )
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "3", None])
+def test_invalid_parallel_request_count(value):
+    with pytest.raises(ValueError):
+        Settings.from_config({"experimental": {"judge_parallel_requests": value}})
+
+
+def test_parallel_request_count_configuration():
+    assert Settings().judge_parallel_requests == 1
+    assert (
+        Settings.from_config(
+            {"experimental": {"judge_parallel_requests": 5}}
+        ).judge_parallel_requests
+        == 5
     )

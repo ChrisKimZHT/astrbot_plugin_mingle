@@ -156,18 +156,6 @@
       }
     }
   },
-  "debug": {
-    "type": "object",
-    "description": "调试",
-    "items": {
-      "debug_sessions": {
-        "type": "list",
-        "default": [],
-        "description": "Debug 群聊 / 私聊会话",
-        "hint": "填写完整 UMO，例如 bot:GroupMessage:群ID 或 bot:FriendMessage:用户ID。空列表关闭调试。记录决策器输入输出及 Agent 初始请求和最终回复，包含提示词和聊天内容；JSON 和表格 HTML 保存到插件数据目录 debug/，日志仅打印 HTML 绝对路径。"
-      }
-    }
-  },
   "toolbox": {
     "type": "object",
     "description": "额外工具箱",
@@ -234,6 +222,30 @@
         "description": "图片编辑接口提供商",
         "hint": "选择已配置生图模型名称的 OpenAI 兼容提供商，复用其模型名称、接口地址、当前 Key、代理、自定义请求头和超时。不支持 Azure；留空时调用返回配置错误。生图耗时较长时，按需调整 AstrBot 工具调用超时及提供商超时。",
         "_special": "select_provider"
+      }
+    }
+  },
+  "debug": {
+    "type": "object",
+    "description": "调试",
+    "items": {
+      "debug_sessions": {
+        "type": "list",
+        "default": [],
+        "description": "Debug 群聊 / 私聊会话",
+        "hint": "填写完整 UMO，例如 bot:GroupMessage:群ID 或 bot:FriendMessage:用户ID。空列表关闭调试。记录决策器输入输出及 Agent 初始请求和最终回复，包含提示词和聊天内容；JSON 和表格 HTML 保存到插件数据目录 debug/，日志仅打印 HTML 绝对路径。"
+      }
+    }
+  },
+  "experimental": {
+    "type": "object",
+    "description": "实验功能",
+    "items": {
+      "judge_parallel_requests": {
+        "type": "int",
+        "default": 1,
+        "description": "判别器并行请求数",
+        "hint": "每次判别以相同输入并行请求 N 次，等待全部完成后先对 should_reply 取票数最多的值，再排除与其冲突的 action 值后票选 action，平票随机。必须为正整数，1 保持单次判别。失败或无效结果按 false / wait 计票；请求数量与模型费用随 N 增加。"
       }
     }
   }

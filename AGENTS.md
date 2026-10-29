@@ -148,9 +148,9 @@
 - `src/settings.py` validates immutable runtime settings. `_conf_schema.json` exposes
   these settings in AstrBot's configuration UI. Use one level of object groups
   in this order: general (基础设置), scheduler (调度器), judge (判别器),
-  generator (生成器), history (聊天记录), images (图片缓存), debug (调试),
+  generator (生成器), history (聊天记录), images (图片缓存),
   toolbox (额外工具箱), followed by tool-specific configuration groups named
-  after the actual registered tools. Keep the master and individual enable
+  after the actual registered tools, then debug (调试) and experimental (实验功能). Keep the master and individual enable
   switches in toolbox; place other tool settings in their own sections. Image generation and
   image editing each have such a section.
   CONFIG_GROUPS maps
@@ -368,3 +368,11 @@ be verified separately with configured credentials; tests do not contact them.
   20 MiB. Keep an independent default-true toolbox_image_edit_enabled switch and
   provider selection under mingle_edit_image. Never accept model-supplied paths
   or sessions, retry paid edits automatically, or return images to the model.
+
+- Experimental settings appear in the final experimental (实验功能) group.
+  judge_parallel_requests is a positive integer, default 1. Each judgment sends
+  N concurrent requests with identical resolved inputs and independent timeouts
+  and debug request IDs, then waits for all results. Failed or invalid requests
+  contribute false/wait votes. Vote should_reply first, then count all action
+  votes compatible with that winner (wait plus rerun for true, stop for false).
+  Choose uniformly among tied highest counts at each level.
