@@ -437,9 +437,9 @@ async def test_backlog_review_uses_wake_count_and_system_instructions(
     assert "Try hard not to reply" in backlog_system
     assert "interested in these topics" in backlog_system
     base_rules = judge.settings.judge_prompt + judge.settings.judge_prompt_append
-    assert backlog_system.startswith(base_rules + "\n\nThis is a scheduled review")
-    assert backlog_system.index("Try hard not to reply") < backlog_system.index(
-        "```quote"
+    assert backlog_system.startswith(base_rules)
+    assert backlog_system.index("\n```") < backlog_system.index(
+        "This is a scheduled review"
     )
     backlog_prompts = {call.kwargs["prompt"] for call in backlog_calls}
     assert len(backlog_prompts) == 1
@@ -450,6 +450,9 @@ async def test_backlog_review_uses_wake_count_and_system_instructions(
     assert "backlog_context" not in json.loads(ordinary["prompt"])
     assert "This is a scheduled review" not in ordinary["system_prompt"]
     assert "Try hard not to reply" not in ordinary["system_prompt"]
+    assert backlog_system.startswith(
+        ordinary["system_prompt"] + "\n\nThis is a scheduled review"
+    )
     assert judge.settings.judge_parallel_requests == 1
     assert judge.settings.judge_wake_parallel_requests == 3
 

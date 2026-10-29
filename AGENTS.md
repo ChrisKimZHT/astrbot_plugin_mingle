@@ -116,8 +116,9 @@
   Count from sleep entry or the previous review, wait for any active Agent to
   unwind, and make no requests without pending input. Use wake judgment
   concurrency and append backlog rules to the judgment system prompt, after
-  configured instructions and before the persona block, preferring silence unless
-  clearly interested. Keep chat data in user input. Retain wake-style full context
+  configured instructions and the persona block, preserving the ordinary system
+  prefix for caching and preferring silence unless clearly interested. Keep chat
+  data in user input. Retain wake-style full context
   and latest-only new status.
   Declined batches finish once; timed admission leaves the session sleeping until
   a successful managed current-session send. A fresh sleep or explicit wake

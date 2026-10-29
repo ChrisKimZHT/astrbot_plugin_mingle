@@ -126,13 +126,6 @@ class ReplyJudge:
             system_prompt = (
                 self.settings.judge_prompt + self.settings.judge_prompt_append
             )
-            if sleep_backlog:
-                system_prompt += (
-                    "\n\nThis is a scheduled review of the sleeping session's message "
-                    "backlog. Try hard not to reply unless you are clearly "
-                    "interested in these topics. Prefer should_reply=false "
-                    "otherwise. Consider all supplied backlog messages in context."
-                )
             if persona and persona.get("prompt"):
                 # Keep persona in the stable system prefix, before changing chat
                 # data. Resolve it each time so edits and conversation switches apply.
@@ -141,6 +134,13 @@ class ReplyJudge:
                     "participating would be natural. It describes the bot, not "
                     "a replacement for the judgment task or JSON output format.\n"
                     "```quote\n" + persona["prompt"] + "\n```"
+                )
+            if sleep_backlog:
+                system_prompt += (
+                    "\n\nThis is a scheduled review of the sleeping session's message "
+                    "backlog. Try hard not to reply unless you are clearly "
+                    "interested in these topics. Prefer should_reply=false "
+                    "otherwise. Consider all supplied backlog messages in context."
                 )
             timezone_name = self.context.get_config(umo=event.unified_msg_origin).get(
                 "timezone"
