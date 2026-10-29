@@ -418,6 +418,24 @@ async def test_parallel_two_level_vote(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["should_reply", "evaluate"])
+@pytest.mark.parametrize("waking,expected_count", [(False, 2), (True, 3)])
+async def test_parallel_count_follows_batch_wake_state(
+    context, event, method, waking, expected_count
+):
+    judge = ReplyJudge(
+        context,
+        Settings(judge_parallel_requests=2, judge_wake_parallel_requests=3),
+        logging.getLogger(),
+    )
+    evaluate = getattr(judge, method)
+    await evaluate(event, [], waking=waking)
+    assert context.llm_generate.await_count == expected_count
+    assert judge.settings.judge_parallel_requests == 2
+    assert judge.settings.judge_wake_parallel_requests == 3
+
+
+@pytest.mark.asyncio
 async def test_parallel_requests_overlap_and_have_distinct_debug_ids(context, event):
     started = 0
     ready = asyncio.Event()

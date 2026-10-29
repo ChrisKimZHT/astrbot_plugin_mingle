@@ -408,7 +408,10 @@ be verified separately with configured credentials; tests do not contact them.
   or sessions, retry paid edits automatically, or return images to the model.
 
 - Experimental settings appear in the final experimental (实验功能) group.
-  judge_parallel_requests is a positive integer, default 1. Each judgment sends
+  judge_parallel_requests controls awake judgments; judge_wake_parallel_requests
+  controls the batch that wakes a sleeping session. Both are positive integers,
+  default 1, under experimental. Pass the scheduler's captured waking flag to
+  the judge; do not infer it from mentions or mutate shared settings. Each judgment sends
   N concurrent requests with identical resolved inputs and independent timeouts
   and debug request IDs, then waits for all results. Failed or invalid requests
   contribute false/wait votes. Vote should_reply first, then count all action

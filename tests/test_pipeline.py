@@ -130,7 +130,11 @@ async def test_private_and_mentions_bypass_judgment_and_bind_conversation(plugin
 @pytest.mark.parametrize("reply", [False, True])
 async def test_sleep_wake_prompt_status_and_full_agent_batch(plugin, wake_kind, reply):
     plugin.settings = replace(
-        plugin.settings, sleep_wake_keywords=("Mingle",), initial_context_messages=1
+        plugin.settings,
+        sleep_wake_keywords=("Mingle",),
+        initial_context_messages=1,
+        judge_parallel_requests=2,
+        judge_wake_parallel_requests=3,
     )
     plugin.scheduler.settings = plugin.settings
     plugin.scheduler.judge.settings = plugin.settings
@@ -165,6 +169,7 @@ async def test_sleep_wake_prompt_status_and_full_agent_batch(plugin, wake_kind, 
         assert isinstance(result, ProviderRequest) == reply
         judgment_prompt = plugin.context.llm_generate.await_args.kwargs["prompt"]
         judgment = json.loads(judgment_prompt)
+        assert plugin.context.llm_generate.await_count == 3
         assert [row["status"] for row in judgment["messages"]] == [
             "history",
             "history",

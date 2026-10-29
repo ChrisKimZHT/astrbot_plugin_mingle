@@ -44,6 +44,7 @@ class ReplyJudge:
         *,
         message_status: dict | None = None,
         new_message_ids: list[int] | None = None,
+        waking: bool = False,
     ) -> bool:
         """Return an idle-session reply decision.
 
@@ -52,6 +53,7 @@ class ReplyJudge:
             messages: Recent chronological chat records.
             message_status: Live scheduling state indexed by message record IDs.
             new_message_ids: Records triggering this evaluation.
+            waking: Whether this batch wakes a sleeping session.
 
         Returns:
             Whether the model explicitly permits a reply.
@@ -61,6 +63,7 @@ class ReplyJudge:
             messages,
             message_status=message_status,
             new_message_ids=new_message_ids,
+            waking=waking,
         )
         return decision.should_reply
 
@@ -71,6 +74,7 @@ class ReplyJudge:
         *,
         new_message_ids: list[int] | None = None,
         message_status: dict | None = None,
+        waking: bool = False,
     ) -> ReplyDecision:
         """Ask a configured provider whether joining the conversation is useful.
 
@@ -79,6 +83,7 @@ class ReplyJudge:
             messages: Recent chronological chat records, treated as untrusted data.
             new_message_ids: Records whose arrival triggered this evaluation.
             message_status: Finished, active, queued, and pending record IDs.
+            waking: Whether to use the wake-specific parallel request count.
 
         Returns:
             A validated reply and interruption decision. Failures and malformed
@@ -190,7 +195,10 @@ class ReplyJudge:
                 len(new_ids),
             )
             requests = []
-            for _ in range(self.settings.judge_parallel_requests):
+            parallel_requests = self.settings.judge_parallel_requests
+            if waking:
+                parallel_requests = self.settings.judge_wake_parallel_requests
+            for _ in range(parallel_requests):
                 requests.append(
                     self._evaluate_request(event, provider_id, prompt, system_prompt)
                 )

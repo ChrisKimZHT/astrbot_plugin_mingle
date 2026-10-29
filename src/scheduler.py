@@ -461,6 +461,7 @@ class ChatScheduler:
                 records,
                 message_status=message_status,
                 new_message_ids=new_message_ids,
+                waking=waking,
             )
         if not waking and any(item.forced for item in batch):
             self.logger.info(
@@ -472,6 +473,7 @@ class ChatScheduler:
             records,
             message_status=message_status,
             new_message_ids=new_message_ids,
+            waking=waking,
         )
         return ReplyDecision(should_reply)
 

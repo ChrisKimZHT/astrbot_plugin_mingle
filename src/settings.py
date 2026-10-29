@@ -35,7 +35,7 @@ CONFIG_GROUPS = {
     "mingle_generate_image": ("toolbox_image_generate_provider_id",),
     "mingle_edit_image": ("toolbox_image_edit_provider_id",),
     "debug": ("debug_sessions",),
-    "experimental": ("judge_parallel_requests",),
+    "experimental": ("judge_parallel_requests", "judge_wake_parallel_requests"),
 }
 
 DEFAULT_JUDGE_PROMPT = (
@@ -175,6 +175,7 @@ class Settings:
     judge_prompt: str = DEFAULT_JUDGE_PROMPT
     judge_prompt_append: str = ""
     judge_parallel_requests: int = 1
+    judge_wake_parallel_requests: int = 1
     judge_timeout: float = 20.0
     generator_prompt: str = DEFAULT_GENERATOR_PROMPT
     generator_prompt_append: str = ""
@@ -263,6 +264,7 @@ class Settings:
                 raise ValueError(f"{name} must be between 0 and 86400")
         for name in (
             "judge_parallel_requests",
+            "judge_wake_parallel_requests",
             "initial_context_messages",
             "max_pending_messages",
             "retention_days",
