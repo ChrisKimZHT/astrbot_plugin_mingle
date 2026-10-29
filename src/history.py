@@ -26,7 +26,10 @@ def boundary_group(event: AstrMessageEvent) -> str | None:
     """Return the platform-scoped group identity for a group event."""
     if event.is_private_chat() or not event.get_group_id():
         return None
-    return f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{event.get_group_id()}"
+    return (
+        f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:"
+        f"{event.get_group_id()}"
+    )
 
 
 def _copy_image(path: Path, directory: Path, max_bytes: int) -> tuple[str, int]:
@@ -169,16 +172,13 @@ class ChatHistory:
                     row = await cursor.fetchone()
                 if row is None:
                     snippets.append(None)
+                    continue
+                text = row[0].replace("\r", " ").replace("\n", " ")
+                if len(text) > 25:
+                    preview_text = text[:24] + "…"
                 else:
-                    text = row[0].replace("\r", " ").replace("\n", " ")
-                    snippets.append(
-                        {
-                            "text": text[:24] + "…"
-                            if len(text) > 25
-                            else text or "（非文本消息）",
-                            "timestamp": row[1],
-                        }
-                    )
+                    preview_text = text or "（非文本消息）"
+                snippets.append({"text": preview_text, "timestamp": row[1]})
             return snippets[0], snippets[1]
 
     async def clear_boundary(self, group: str) -> bool:
@@ -251,9 +251,8 @@ class ChatHistory:
                         exc_info=True,
                     )
                 images.append(digest)
-                parts.append(
-                    f"[image {len(images) - 1}: {'available' if digest else 'unavailable'}]"
-                )
+                availability = "available" if digest else "unavailable"
+                parts.append(f"[image {len(images) - 1}: {availability}]")
             else:
                 parts.append(f"[{component.type.value}]")
         text = " ".join(parts).strip()
@@ -270,16 +269,19 @@ class ChatHistory:
                 f"{role}:{sender_id}:{message_id}" if message_id else uuid.uuid4().hex
             )
         async with self.lock:
+            session = event.unified_msg_origin
+            if role == "bot":
+                timestamp = time.time()
+            else:
+                timestamp = getattr(event.message_obj, "timestamp", time.time())
             cursor = await self.db.execute(
                 "INSERT OR IGNORE INTO messages "
                 "(session, source_key, timestamp, sender_id, sender_name, role, text, reply_to, images) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    event.unified_msg_origin,
+                    session,
                     source_key,
-                    time.time()
-                    if role == "bot"
-                    else getattr(event.message_obj, "timestamp", time.time()),
+                    timestamp,
                     str(sender_id),
                     str(sender_name or ""),
                     role,
@@ -341,7 +343,8 @@ class ChatHistory:
         if keyword:
             query += " AND instr(lower(text), lower(?)) > 0"
             values.append(keyword)
-        query += " ORDER BY id " + ("ASC" if after_id else "DESC") + " LIMIT ?"
+        ordering = "ASC" if after_id else "DESC"
+        query += f" ORDER BY id {ordering} LIMIT ?"
         values.append(limit)
         async with self.lock:
             async with self.db.execute(query, values) as cursor:
@@ -350,19 +353,17 @@ class ChatHistory:
         for row in sorted(rows, key=lambda item: item["id"]):
             record = dict(row)
             source_key = record.pop("source_key")
-            record["platform_message_id"] = (
-                source_key.split(":", 2)[2]
-                if record["role"] == "user" and source_key.startswith("user:")
-                else None
-            )
+            if record["role"] == "user" and source_key.startswith("user:"):
+                record["platform_message_id"] = source_key.split(":", 2)[2]
+            else:
+                record["platform_message_id"] = None
             record.pop("session")
-            record["images"] = [
-                {
-                    "index": index,
-                    "available": bool(digest and (self.images / digest).is_file()),
-                }
-                for index, digest in enumerate(json.loads(record["images"]))
-            ]
+            cached_images = json.loads(record["images"])
+            image_details = []
+            for index, digest in enumerate(cached_images):
+                available = bool(digest and (self.images / digest).is_file())
+                image_details.append({"index": index, "available": available})
+            record["images"] = image_details
             records.append(record)
         # Keep tool output and prompt snapshots bounded even for very long posts.
         budget = 24000
@@ -442,9 +443,11 @@ class ChatHistory:
                     "DELETE FROM images WHERE digest=?", (row["digest"],)
                 )
             # A crash between file creation and DB commit can leave unreferenced files.
-            known = {
-                row["digest"] for row in rows if (self.images / row["digest"]).exists()
-            }
+            known = set()
+            for row in rows:
+                path = self.images / row["digest"]
+                if path.exists():
+                    known.add(row["digest"])
             for path in self.images.iterdir():
                 if path.is_file() and path.name not in known:
                     await asyncio.to_thread(path.unlink, missing_ok=True)

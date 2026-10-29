@@ -24,14 +24,13 @@ def draw_random(
     if type(count) is not int or not 1 <= count <= 100:
         return json.dumps({"error": "Count must be an integer between 1 and 100."})
     if choices is not None:
-        if (
-            not isinstance(choices, list)
-            or not 1 <= len(choices) <= 100
-            or any(
-                not isinstance(item, str) or not item.strip() or len(item) > 200
-                for item in choices
-            )
-        ):
+        invalid_choices = not isinstance(choices, list) or not 1 <= len(choices) <= 100
+        if not invalid_choices:
+            for item in choices:
+                if not isinstance(item, str) or not item.strip() or len(item) > 200:
+                    invalid_choices = True
+                    break
+        if invalid_choices:
             return json.dumps(
                 {
                     "error": "Choices must contain 1 to 100 nonempty strings, each at most 200 characters."
@@ -55,7 +54,10 @@ def draw_random(
                 "error": "Integer bounds must satisfy -1e12 <= minimum <= maximum <= 1e12."
             }
         )
-    results = [minimum + secrets.randbelow(maximum - minimum + 1) for _ in range(count)]
+    range_size = maximum - minimum + 1
+    results = []
+    for _ in range(count):
+        results.append(minimum + secrets.randbelow(range_size))
     return json.dumps(
         {"mode": "integer", "minimum": minimum, "maximum": maximum, "results": results}
     )

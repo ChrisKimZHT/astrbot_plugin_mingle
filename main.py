@@ -137,12 +137,13 @@ class MinglePlugin(Star):
                     for record in preview:
                         if record is None:
                             lines.append("（暂无保留的消息）")
-                        else:
-                            formatted = format_prompt_history([record], timezone_name)[
-                                0
-                            ]
-                            timestamp = formatted["timestamp"] or "未知时间"
-                            lines.append(f"[{timestamp}] {formatted['text']}")
+                            continue
+                        formatted_records = format_prompt_history(
+                            [record], timezone_name
+                        )
+                        formatted = formatted_records[0]
+                        timestamp = formatted["timestamp"] or "未知时间"
+                        lines.append(f"[{timestamp}] {formatted['text']}")
                     message = f"{lines[0]}\n\n--- barrier ---\n\n{lines[1]}"
         except Exception:
             self.logger.exception("Failed to manage history boundary for %s", group)
@@ -169,7 +170,10 @@ class MinglePlugin(Star):
         if state not in {"on", "off"}:
             yield event.plain_result("用法：/mingle group on 或 /mingle group off")
             return
-        group_session = f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{event.get_group_id()}"
+        group_session = (
+            f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:"
+            f"{event.get_group_id()}"
+        )
         async with self.config_lock:
             previous = dict(self.config["general"])
             sessions = list(previous.get("group_sessions", []))
@@ -207,7 +211,10 @@ class MinglePlugin(Star):
                             + session_state.judging
                         ):
                             current = ticket.event
-                            current_group = f"{current.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{current.get_group_id()}"
+                            current_group = (
+                                f"{current.get_platform_id()}:"
+                                f"{MessageType.GROUP_MESSAGE.value}:{current.get_group_id()}"
+                            )
                             if (
                                 current_group == group_session
                                 and not ticket.ready.done()
@@ -244,7 +251,10 @@ class MinglePlugin(Star):
             return
         session = event.unified_msg_origin
         if not event.is_private_chat() and event.get_group_id():
-            session = f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{event.get_group_id()}"
+            session = (
+                f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:"
+                f"{event.get_group_id()}"
+            )
         async with self.config_lock:
             previous = dict(self.config["debug"])
             sessions = [
@@ -307,15 +317,19 @@ class MinglePlugin(Star):
         if event.get_self_id() == event.get_sender_id():
             return
         for handler in event.get_extra("activated_handlers", []):
-            if getattr(
+            is_whisper_handler = getattr(
                 handler, "handler_module_path", None
             ) == self.__module__ and handler.handler_name in {
                 "whisper",
                 "whisper_alias",
-            }:
+            }
+            if is_whisper_handler:
                 await self.whisper(event)
                 return
-        group_session = f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{event.get_group_id()}"
+        group_session = (
+            f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:"
+            f"{event.get_group_id()}"
+        )
         if event.is_private_chat():
             if (
                 not self.settings.private_enabled
@@ -361,9 +375,8 @@ class MinglePlugin(Star):
                 return
             if not await SessionServiceManager.should_process_llm_request(event):
                 return
-            ticket = await self.scheduler.submit(
-                event, record_id, event.is_private_chat() or event.is_at_or_wake_command
-            )
+            forced = event.is_private_chat() or event.is_at_or_wake_command
+            ticket = await self.scheduler.submit(event, record_id, forced)
             batch_ids = await ticket.ready
             if (
                 not batch_ids
@@ -511,17 +524,16 @@ class MinglePlugin(Star):
             if message.get("role") != "user":
                 continue
             content = message.get("content", "")
-            texts = (
-                [content]
-                if isinstance(content, str)
-                else [
+            if isinstance(content, str):
+                texts = [content]
+            elif isinstance(content, list):
+                texts = [
                     part.get("text", "")
                     for part in content
                     if part.get("type") == "text"
                 ]
-                if isinstance(content, list)
-                else []
-            )
+            else:
+                texts = []
             for text in texts:
                 match = re.search(
                     r"(?:^|\n\n)New batch record IDs: \[\d+(?:, \d+)*\]\. Snapshot ends at record (\d+)\.\n",
@@ -571,11 +583,14 @@ class MinglePlugin(Star):
             "mingle_generate_image": self.settings.toolbox_image_generate_enabled,
             "mingle_edit_image": self.settings.toolbox_image_edit_enabled,
         }
-        disabled = {
-            name
-            for name, individual in enabled.items()
-            if not self.available or not self.settings.toolbox_enabled or not individual
-        }
+        disabled = set()
+        for name, individual in enabled.items():
+            if (
+                not self.available
+                or not self.settings.toolbox_enabled
+                or not individual
+            ):
+                disabled.add(name)
         if disabled:
             request.func_tool = ToolSet(
                 [tool for tool in request.func_tool.tools if tool.name not in disabled]
@@ -597,9 +612,11 @@ class MinglePlugin(Star):
             self.settings.generator_prompt + self.settings.generator_prompt_append
         )
         if instructions:
-            request.system_prompt = (
-                (request.system_prompt + "\n\n") if request.system_prompt else ""
-            ) + instructions
+            if request.system_prompt:
+                system_prefix = request.system_prompt + "\n\n"
+            else:
+                system_prefix = ""
+            request.system_prompt = system_prefix + instructions
 
     @filter.on_llm_request(priority=-maxsize + 1)
     async def clear_history_images(

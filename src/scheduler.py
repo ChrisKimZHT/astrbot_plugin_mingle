@@ -190,9 +190,8 @@ class ChatScheduler:
                     batch = []
                     continue
                 self._apply_control(key, state, leader, active, decision)
-                allowed = (
-                    forced or decision.should_reply
-                ) and decision.action != "stop"
+                reply_requested = forced or decision.should_reply
+                allowed = reply_requested and decision.action != "stop"
                 if not allowed or self.closed or leader.ready.done():
                     self._finish_records(
                         state, [item.record_id for item in batch], "no_reply"
@@ -200,11 +199,12 @@ class ChatScheduler:
                     for item in batch:
                         item.release()
                 else:
-                    if (
+                    should_fold_pending = (
                         decision.should_reply
                         and decision.action == "wait"
                         and (active is not None or not forced)
-                    ):
+                    )
+                    if should_fold_pending:
                         # Freeze the tail once judgment returns. Later arrivals
                         # still need judgment, including stop/rerun requests.
                         batch.extend(_waiting_messages(state.pending))
@@ -306,27 +306,23 @@ class ChatScheduler:
         if missing_ids:
             # Preserve active input even when arrivals push it outside the
             # recent-history window. Keep IDs tied to the captured Agent.
-            active_records = await asyncio.gather(
-                *(
+            history_requests = []
+            for record_id in missing_ids:
+                history_requests.append(
                     self.history.get(
                         key,
                         limit=1,
                         after_id=record_id - 1,
                         before_id=record_id + 1,
                     )
-                    for record_id in missing_ids
                 )
-            )
-            records = sorted(
-                records
-                + [
-                    item
-                    for rows in active_records
-                    for item in rows
-                    if item["id"] in missing_ids
-                ],
-                key=lambda item: item["id"],
-            )
+            active_records = await asyncio.gather(*history_requests)
+            missing_records = []
+            for rows in active_records:
+                for item in rows:
+                    if item["id"] in missing_ids:
+                        missing_records.append(item)
+            records = sorted(records + missing_records, key=lambda item: item["id"])
         message_status = {
             "finished": [
                 {"id": record_id, "outcome": outcome}
@@ -354,14 +350,13 @@ class ChatScheduler:
                 "Mingle judgment bypassed for forced idle batch in session %s", key
             )
             return ReplyDecision(True)
-        return ReplyDecision(
-            await self.judge.should_reply(
-                leader.event,
-                records,
-                message_status=message_status,
-                new_message_ids=[item.record_id for item in batch],
-            )
+        should_reply = await self.judge.should_reply(
+            leader.event,
+            records,
+            message_status=message_status,
+            new_message_ids=[item.record_id for item in batch],
         )
+        return ReplyDecision(should_reply)
 
     def _apply_control(
         self,
@@ -469,14 +464,10 @@ class ChatScheduler:
                 # The handler sets finished after the framework's history save,
                 # not merely after its final response hook or first send.
                 await leader.finished.wait()
-                outcome = (
-                    "interrupted"
-                    if (
-                        leader.event.get_extra("agent_user_aborted", False)
-                        or leader.event.get_extra("agent_stop_requested", False)
-                    )
-                    else "completed"
-                )
+                interrupted = leader.event.get_extra(
+                    "agent_user_aborted", False
+                ) or leader.event.get_extra("agent_stop_requested", False)
+                outcome = "interrupted" if interrupted else "completed"
                 self._finish_records(state, state.active_ids, outcome)
                 if leader.event.get_extra("mingle_agent_started", False):
                     state.last_agent_finished_at = monotonic()

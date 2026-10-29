@@ -72,41 +72,51 @@ def _render_debug_value(value: object) -> str:
                 )
         return raw
     if isinstance(value, dict) and value:
-        rows = "".join(
-            f'<tr><th scope="row">{escape(str(key))}</th>'
-            f"<td>{_render_debug_value(item)}</td></tr>"
-            for key, item in value.items()
-        )
+        rows = []
+        for key, item in value.items():
+            label = escape(str(key))
+            rendered_item = _render_debug_value(item)
+            rows.append(
+                f'<tr><th scope="row">{label}</th><td>{rendered_item}</td></tr>'
+            )
+        body = "".join(rows)
         return (
             "<table><thead><tr><th>Field</th><th>Value</th></tr></thead>"
-            f"<tbody>{rows}</tbody></table>"
+            f"<tbody>{body}</tbody></table>"
         )
-    if isinstance(value, list) and value:
-        if all(isinstance(item, dict) for item in value):
-            columns = list(dict.fromkeys(key for item in value for key in item))
-            if columns:
-                headings = "".join(f"<th>{escape(str(key))}</th>" for key in columns)
-                rows = "".join(
-                    "<tr>"
-                    + "".join(
-                        f"<td>{_render_debug_value(item[key])}</td>"
-                        if key in item
-                        else "<td>(missing)</td>"
-                        for key in columns
-                    )
-                    + "</tr>"
-                    for item in value
-                )
-                return f"<table><thead><tr>{headings}</tr></thead><tbody>{rows}</tbody></table>"
-        rows = "".join(
-            f'<tr><th scope="row">{index}</th><td>{_render_debug_value(item)}</td></tr>'
-            for index, item in enumerate(value)
-        )
-        return (
-            "<table><thead><tr><th>Index</th><th>Value</th></tr></thead>"
-            f"<tbody>{rows}</tbody></table>"
-        )
-    return f"<pre>{escape(json.dumps(value, ensure_ascii=False))}</pre>"
+    if not isinstance(value, list) or not value:
+        return f"<pre>{escape(json.dumps(value, ensure_ascii=False))}</pre>"
+
+    column_keys = {}
+    if all(isinstance(item, dict) for item in value):
+        for item in value:
+            for key in item:
+                column_keys[key] = None
+    columns = list(column_keys)
+    if columns:
+        headings = "".join(f"<th>{escape(str(key))}</th>" for key in columns)
+        rows = []
+        for item in value:
+            cells = []
+            for key in columns:
+                if key in item:
+                    rendered_item = _render_debug_value(item[key])
+                    cells.append(f"<td>{rendered_item}</td>")
+                else:
+                    cells.append("<td>(missing)</td>")
+            rows.append("<tr>" + "".join(cells) + "</tr>")
+        body = "".join(rows)
+        return f"<table><thead><tr>{headings}</tr></thead><tbody>{body}</tbody></table>"
+
+    rows = []
+    for index, item in enumerate(value):
+        rendered_item = _render_debug_value(item)
+        rows.append(f'<tr><th scope="row">{index}</th><td>{rendered_item}</td></tr>')
+    body = "".join(rows)
+    return (
+        "<table><thead><tr><th>Index</th><th>Value</th></tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+    )
 
 
 def render_debug_html(document: dict, json_filename: str) -> str:
@@ -159,7 +169,10 @@ class DebugDumper:
             return True
         if event.is_private_chat() or not event.get_group_id():
             return False
-        group_session = f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{event.get_group_id()}"
+        group_session = (
+            f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:"
+            f"{event.get_group_id()}"
+        )
         return group_session in self.settings.debug_sessions
 
     async def dump(

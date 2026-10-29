@@ -56,14 +56,13 @@ class ReplyJudge:
         Returns:
             Whether the model explicitly permits a reply.
         """
-        return (
-            await self.evaluate(
-                event,
-                messages,
-                message_status=message_status,
-                new_message_ids=new_message_ids,
-            )
-        ).should_reply
+        decision = await self.evaluate(
+            event,
+            messages,
+            message_status=message_status,
+            new_message_ids=new_message_ids,
+        )
+        return decision.should_reply
 
     async def evaluate(
         self,
@@ -95,13 +94,13 @@ class ReplyJudge:
             conversation_id = await conversation_manager.get_curr_conversation_id(
                 event.unified_msg_origin
             )
-            conversation = (
-                await conversation_manager.get_conversation(
+            if conversation_id:
+                conversation = await conversation_manager.get_conversation(
                     event.unified_msg_origin, conversation_id
                 )
-                if conversation_id
-                else None
-            )
+            else:
+                conversation = None
+            conversation_persona_id = conversation.persona_id if conversation else None
             (
                 _,
                 persona,
@@ -109,9 +108,7 @@ class ReplyJudge:
                 _,
             ) = await self.context.persona_manager.resolve_selected_persona(
                 umo=event.unified_msg_origin,
-                conversation_persona_id=conversation.persona_id
-                if conversation
-                else None,
+                conversation_persona_id=conversation_persona_id,
                 platform_name=event.get_platform_name(),
             )
             system_prompt = (
@@ -136,21 +133,21 @@ class ReplyJudge:
             queued_ids = set(status_data.get("queued", []))
             include_status = message_status is not None or new_message_ids is not None
             for record in judgment_messages:
-                if include_status:
-                    record_id = record.get("id")
-                    if record_id in new_ids:
-                        record["status"] = "new"
-                    elif record_id in processing_ids:
-                        record["status"] = "processing"
-                    elif record_id in queued_ids:
-                        record["status"] = "queued"
-                    else:
-                        # History means context only, not proof of a sent reply.
-                        record["status"] = "history"
+                if not include_status:
+                    continue
+                record_id = record.get("id")
+                if record_id in new_ids:
+                    record["status"] = "new"
+                elif record_id in processing_ids:
+                    record["status"] = "processing"
+                elif record_id in queued_ids:
+                    record["status"] = "queued"
+                else:
+                    # History means context only, not proof of a sent reply.
+                    record["status"] = "history"
             now = datetime.now(timezone.utc).timestamp()
-            current_time = format_prompt_history([{"timestamp": now}], timezone_name)[
-                0
-            ]["timestamp"]
+            formatted_time = format_prompt_history([{"timestamp": now}], timezone_name)
+            current_time = formatted_time[0]["timestamp"]
             previous_message = None
             for index, record in enumerate(messages):
                 if record.get("id") in new_ids:
@@ -170,12 +167,12 @@ class ReplyJudge:
                             (60, "minute"),
                             (1, "second"),
                         ):
-                            if elapsed >= size or size == 1:
-                                count = elapsed // size
-                                elapsed_text = (
-                                    f"{count} {unit}{'s' if count != 1 else ''}"
-                                )
-                                break
+                            if elapsed < size and size != 1:
+                                continue
+                            count = elapsed // size
+                            suffix = "s" if count != 1 else ""
+                            elapsed_text = f"{count} {unit}{suffix}"
+                            break
                 except (KeyError, TypeError, ValueError, OverflowError):
                     pass
             prompt_data = {
@@ -192,36 +189,36 @@ class ReplyJudge:
                 len(judgment_messages),
                 len(new_ids),
             )
-            decisions = await asyncio.gather(
-                *(
+            requests = []
+            for _ in range(self.settings.judge_parallel_requests):
+                requests.append(
                     self._evaluate_request(event, provider_id, prompt, system_prompt)
-                    for _ in range(self.settings.judge_parallel_requests)
                 )
-            )
+            decisions = await asyncio.gather(*requests)
             if len(decisions) == 1:
                 return decisions[0]
             # Vote on reply admission first, then exclude incompatible actions.
             reply_votes = Counter(decision.should_reply for decision in decisions)
-            should_reply = random.choice(
-                [
-                    value
-                    for value, count in reply_votes.items()
-                    if count == max(reply_votes.values())
-                ]
-            )
+            highest_reply_count = max(reply_votes.values())
+            reply_candidates = [
+                value
+                for value, count in reply_votes.items()
+                if count == highest_reply_count
+            ]
+            should_reply = random.choice(reply_candidates)
             allowed_actions = {"wait", "rerun" if should_reply else "stop"}
             action_votes = Counter(
                 decision.action
                 for decision in decisions
                 if decision.action in allowed_actions
             )
-            action = random.choice(
-                [
-                    value
-                    for value, count in action_votes.items()
-                    if count == max(action_votes.values())
-                ]
-            )
+            highest_action_count = max(action_votes.values())
+            action_candidates = [
+                value
+                for value, count in action_votes.items()
+                if count == highest_action_count
+            ]
+            action = random.choice(action_candidates)
             self.logger.info(
                 "Mingle judgment vote for session %s: requests=%d, reply_votes=%s, "
                 "action_votes=%s, should_reply=%s, action=%s",

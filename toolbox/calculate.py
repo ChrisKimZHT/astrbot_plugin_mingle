@@ -49,12 +49,12 @@ def _evaluate(node: ast.AST, expression: str) -> Decimal:
             numerator = left_numerator * right_denominator
             denominator = left_denominator * right_numerator
             quotient = numerator // denominator
-            result = (
-                Decimal(quotient)
-                if isinstance(node.op, ast.FloorDiv)
-                else Decimal(numerator - quotient * denominator)
-                / Decimal(left_denominator * right_denominator)
-            )
+            if isinstance(node.op, ast.FloorDiv):
+                result = Decimal(quotient)
+            else:
+                remainder_numerator = numerator - quotient * denominator
+                remainder_denominator = left_denominator * right_denominator
+                result = Decimal(remainder_numerator) / Decimal(remainder_denominator)
         elif isinstance(node.op, ast.Pow):
             if right != right.to_integral_value() or right.copy_abs() > _MAX_EXPONENT:
                 raise ValueError("Exponents must be integers between -100 and 100.")

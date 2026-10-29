@@ -31,7 +31,8 @@ def _validate_image(encoded: str) -> None:
     """
     if not isinstance(encoded, str) or not encoded:
         raise ValueError("The API did not return base64 image data")
-    if len(encoded) > 4 * ((MAX_IMAGE_BYTES + 2) // 3):
+    max_encoded_length = 4 * ((MAX_IMAGE_BYTES + 2) // 3)
+    if len(encoded) > max_encoded_length:
         raise ValueError("Generated image exceeds the byte limit")
     data = base64.b64decode(encoded, validate=True)
     if len(data) > MAX_IMAGE_BYTES:
@@ -112,10 +113,11 @@ async def _request_image(
             }
         )
     config = provider.provider_config
-    if config.get("type") not in (
+    supported_provider = config.get("type") in (
         "openai_chat_completion",
         "openai_responses",
-    ) or config.get("api_version"):
+    )
+    if not supported_provider or config.get("api_version"):
         return json.dumps(
             {
                 "error": "Select a standard OpenAI-compatible provider; Azure endpoints are unsupported."
@@ -146,10 +148,12 @@ async def _request_image(
                 timeout=timeout,
                 max_retries=0,
             ) as client:
-                method = (
-                    client.images.edit if reference_images else client.images.generate
-                )
-                image_args = {"image": reference_images} if reference_images else {}
+                if reference_images:
+                    method = client.images.edit
+                    image_args = {"image": reference_images}
+                else:
+                    method = client.images.generate
+                    image_args = {}
                 response = await method(
                     **image_args,
                     model=model,
@@ -278,12 +282,12 @@ async def edit_image(
             return json.dumps(
                 {"error": "Combined reference images exceed the byte limit."}
             )
-        extension = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(
-            mime
-        )
+        extensions = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+        extension = extensions.get(mime)
         if extension is None:
             return json.dumps({"error": "Unsupported prepared reference image format."})
-        references.append((f"reference_{len(references) + 1}.{extension}", data, mime))
+        filename = f"reference_{len(references) + 1}.{extension}"
+        references.append((filename, data, mime))
     return await _request_image(
         event,
         provider,

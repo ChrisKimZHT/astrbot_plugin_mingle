@@ -1545,11 +1545,12 @@ async def test_new_tool_switches_are_independent(
     await plugin.apply_toolbox_switches(event, request)
     actual = {tool.name for tool in request.func_tool.tools}
     for item in names:
-        expected = (
-            True
-            if item in {"mingle_chat_history", "native_tool"}
-            else master and (individual if item == name else True)
-        )
+        if item in {"mingle_chat_history", "native_tool"}:
+            expected = True
+        elif item == name:
+            expected = master and individual
+        else:
+            expected = master
         assert (item in actual) is expected
     assert [tool.name for tool in shared.tools] == names
     assert (
