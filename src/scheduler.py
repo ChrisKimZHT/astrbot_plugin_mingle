@@ -73,6 +73,11 @@ class SessionState:
     execution_task: asyncio.Task | None = None
     active: PendingMessage | None = None
     last_agent_finished_at: float = float("-inf")
+    last_agent_reply_at: float = field(default_factory=lambda: monotonic())
+    last_woken_at: float = float("-inf")
+    sleeping: bool = False
+    waking: bool = False
+    sleep_revision: int = 0
     resume_after_rerun: bool = False
     active_ids: list[int] = field(default_factory=list)
     finished: dict[int, str] = field(default_factory=dict)
@@ -95,8 +100,71 @@ class ChatScheduler:
         self.sessions: dict[str, SessionState] = {}
         self.closed = False
 
+    def sleep(self, key: str) -> None:
+        """Suspend judgment and waiting execution without stopping an active turn.
+
+        Args:
+            key: Full unified session identifier, respecting AstrBot isolation.
+        """
+        if self.closed:
+            return
+        state = self.sessions.setdefault(key, SessionState())
+        state.sleeping = True
+        state.waking = False
+        state.sleep_revision += 1
+        waiting_tickets = state.pending + state.judging + state.approved
+        waiting_tickets = _waiting_messages(waiting_tickets)
+        state.pending = sorted(
+            waiting_tickets,
+            key=lambda item: item.record_id,
+        )
+        state.judging = []
+        state.approved = []
+        while len(state.pending) > self.settings.max_pending_messages:
+            oldest = state.pending.pop(0)
+            self._finish_records(state, [oldest.record_id], "merged")
+            oldest.release()
+        state.resume_after_rerun = False
+        state.changed.set()
+        if state.pending and (
+            state.judgment_task is None or state.judgment_task.done()
+        ):
+            state.judgment_task = asyncio.create_task(self._judge_pending(key, state))
+        self.logger.info("Mingle session entered sleep: %s", key)
+
+    def record_agent_reply(self, key: str) -> None:
+        """Refresh inactivity only for an Agent reply, never for incoming chat.
+
+        Args:
+            key: Session in which the managed Agent sent a reply.
+        """
+        if self.closed:
+            return
+        state = self.sessions.setdefault(key, SessionState())
+        state.last_agent_reply_at = monotonic()
+        state.changed.set()
+
+    def _check_sleep(self, key: str, state: SessionState) -> None:
+        """Apply an expired reply deadline without interrupting the active Agent.
+
+        Args:
+            key: Session whose timeout may have elapsed.
+            state: Live session queues and inactivity timestamps.
+        """
+        if state.sleeping:
+            return
+        timeout = self.settings.sleep_seconds
+        last_activity = max(state.last_agent_reply_at, state.last_woken_at)
+        if timeout > 0 and monotonic() >= last_activity + timeout:
+            self.sleep(key)
+
     async def submit(
-        self, event: AstrMessageEvent, record_id: int, forced: bool
+        self,
+        event: AstrMessageEvent,
+        record_id: int,
+        forced: bool,
+        *,
+        wake: bool = False,
     ) -> PendingMessage:
         """Queue an event without starting a second Agent for the same session.
 
@@ -104,6 +172,7 @@ class ChatScheduler:
             event: Original event kept alive by its plugin handler.
             record_id: Persisted chat record identifier.
             forced: Whether a private message or explicit mention bypasses judgment.
+            wake: Whether this message directly mentions the bot or contains a keyword.
 
         Returns:
             Admission ticket whose ready future contains a batch or None.
@@ -120,6 +189,12 @@ class ChatScheduler:
             return ticket
         key = event.unified_msg_origin
         state = self.sessions.setdefault(key, SessionState())
+        self._check_sleep(key, state)
+        if state.sleeping and wake:
+            state.sleeping = False
+            state.waking = True
+            state.last_woken_at = monotonic()
+            self.logger.info("Mingle session woke from sleep: %s", key)
         state.pending.append(ticket)
         if len(state.pending) > self.settings.max_pending_messages:
             oldest = state.pending.pop(0)
@@ -150,18 +225,25 @@ class ChatScheduler:
         batch: list[PendingMessage] = []
         try:
             while state.pending and not self.closed:
-                await self._wait_for_pending(state)
+                await self._wait_for_pending(key, state)
                 batch, state.pending = _waiting_messages(state.pending), []
                 if not batch:
                     continue
                 state.judging = batch
+                revision = state.sleep_revision
+                waking = state.waking
+                state.waking = False
                 leader = batch[-1]
-                forced = any(item.forced for item in batch)
+                forced = not waking and any(item.forced for item in batch)
                 records = await self.history.get(
                     key,
                     limit=self.settings.initial_context_messages,
                     before_id=max(item.record_id for item in batch) + 1,
                 )
+                self._check_sleep(key, state)
+                if revision != state.sleep_revision:
+                    batch = []
+                    continue
                 if leader.ready.done():
                     state.judging = []
                     batch = []
@@ -175,15 +257,24 @@ class ChatScheduler:
                 cooldown_until = (
                     state.last_agent_finished_at + self.settings.cooldown_seconds
                 )
-                if active is None and not forced and monotonic() < cooldown_until:
+                if (
+                    active is None
+                    and not forced
+                    and not waking
+                    and monotonic() < cooldown_until
+                ):
                     state.pending = batch + state.pending
                     state.judging = []
                     batch = []
                     continue
 
                 decision = await self._evaluate_batch(
-                    key, state, batch, records, active
+                    key, state, batch, records, active, waking=waking
                 )
+                self._check_sleep(key, state)
+                if revision != state.sleep_revision:
+                    batch = []
+                    continue
                 # Recovery may have claimed this batch while judgment awaited IO.
                 if leader.ready.done():
                     state.judging = []
@@ -209,6 +300,8 @@ class ChatScheduler:
                         # still need judgment, including stop/rerun requests.
                         batch.extend(_waiting_messages(state.pending))
                         state.pending = []
+                    if waking:
+                        batch[-1].event.set_extra("mingle_woke_from_sleep", True)
                     state.approved.extend(batch)
                     while len(state.approved) > self.settings.max_pending_messages:
                         oldest = state.approved.pop(0)
@@ -240,26 +333,32 @@ class ChatScheduler:
             state.pending.clear()
             state.judging = []
 
-    async def _wait_for_pending(self, state: SessionState) -> None:
+    async def _wait_for_pending(self, key: str, state: SessionState) -> None:
         """Wait until the current arrivals satisfy merge timing and cooldown.
 
         Recompute from original arrival times on every wakeup. An active Agent
         or direct-address ticket bypasses cooldown, but never merge timing.
 
         Args:
+            key: Unified session identifier for sleep transitions.
             state: Session whose pending queue remains open to new arrivals.
         """
         while state.pending and not self.closed:
             state.pending = _waiting_messages(state.pending)
             if not state.pending:
                 return
+            self._check_sleep(key, state)
+            if state.sleeping:
+                state.changed.clear()
+                await state.changed.wait()
+                continue
             merge_at = min(
                 state.pending[-1].received_at + self.settings.debounce_seconds,
                 state.pending[0].received_at + self.settings.max_wait_seconds,
             )
             active = state.active
             busy = active is not None and not active.finished.is_set()
-            forced = any(item.forced for item in state.pending)
+            forced = state.waking or any(item.forced for item in state.pending)
             ready_at = merge_at
             if not busy and not forced:
                 ready_at = max(
@@ -272,6 +371,11 @@ class ChatScheduler:
             # No await between inspecting state and clearing the notification:
             # arrivals and Agent transitions cannot be lost in that interval.
             state.changed.clear()
+            if self.settings.sleep_seconds > 0:
+                last_activity = max(state.last_agent_reply_at, state.last_woken_at)
+                sleep_at = last_activity + self.settings.sleep_seconds
+                remaining_until_sleep = max(0, sleep_at - monotonic())
+                delay = min(delay, remaining_until_sleep)
             try:
                 await asyncio.wait_for(state.changed.wait(), timeout=delay)
             except asyncio.TimeoutError:
@@ -284,6 +388,8 @@ class ChatScheduler:
         batch: list[PendingMessage],
         records: list[dict],
         active: PendingMessage | None,
+        *,
+        waking: bool = False,
     ) -> ReplyDecision:
         """Build judgment context and evaluate against a captured active turn.
 
@@ -296,13 +402,19 @@ class ChatScheduler:
             batch: Arrivals being judged, with the newest event as leader.
             records: Recent history already loaded for this batch.
             active: Active ticket captured after the initial history read.
+            waking: Judge the latest trigger with every retained waiting record.
 
         Returns:
             Reply admission and any requested control action. Idle direct-address
             batches are admitted without calling the judge.
         """
         active_ids = list(state.active_ids) if active is not None else []
-        missing_ids = set(active_ids) - {item["id"] for item in records}
+        revision = state.sleep_revision
+        loaded_record_ids = {item["id"] for item in records}
+        missing_ids = set(active_ids) - loaded_record_ids
+        if waking:
+            batch_record_ids = {item.record_id for item in batch}
+            missing_ids.update(batch_record_ids - loaded_record_ids)
         if missing_ids:
             # Preserve active input even when arrivals push it outside the
             # recent-history window. Keep IDs tied to the captured Agent.
@@ -323,12 +435,14 @@ class ChatScheduler:
                     if item["id"] in missing_ids:
                         missing_records.append(item)
             records = sorted(records + missing_records, key=lambda item: item["id"])
+        if revision != state.sleep_revision or state.sleeping:
+            return ReplyDecision(False)
         message_status = {
             "finished": [
                 {"id": record_id, "outcome": outcome}
                 for record_id, outcome in state.finished.items()
             ],
-            "active": active_ids,
+            "active": [] if waking else active_ids,
             "queued": [
                 item.record_id for item in state.approved if not item.ready.done()
             ],
@@ -338,14 +452,17 @@ class ChatScheduler:
             "judging": [item.record_id for item in batch],
         }
         leader = batch[-1]
+        new_message_ids = [item.record_id for item in batch]
+        if waking:
+            new_message_ids = [leader.record_id]
         if active is not None:
             return await self.judge.evaluate(
                 leader.event,
                 records,
                 message_status=message_status,
-                new_message_ids=[item.record_id for item in batch],
+                new_message_ids=new_message_ids,
             )
-        if any(item.forced for item in batch):
+        if not waking and any(item.forced for item in batch):
             self.logger.info(
                 "Mingle judgment bypassed for forced idle batch in session %s", key
             )
@@ -354,7 +471,7 @@ class ChatScheduler:
             leader.event,
             records,
             message_status=message_status,
-            new_message_ids=[item.record_id for item in batch],
+            new_message_ids=new_message_ids,
         )
         return ReplyDecision(should_reply)
 
@@ -420,6 +537,8 @@ class ChatScheduler:
         state = self.sessions.get(event.unified_msg_origin)
         if state is None or state.active is not ticket:
             return None
+        if state.sleeping:
+            return None
         if ticket.finished.is_set() or event.is_stopped():
             return None
         if event.get_extra("agent_stop_requested", False):
@@ -447,11 +566,18 @@ class ChatScheduler:
         batch: list[PendingMessage] = []
         try:
             while state.approved and not self.closed:
+                self._check_sleep(key, state)
+                if state.sleeping:
+                    break
                 batch, state.approved = _waiting_messages(state.approved), []
                 if not batch:
                     state.resume_after_rerun = False
                     continue
                 leader = batch[-1]
+                for item in batch:
+                    if item.event.get_extra("mingle_woke_from_sleep", False):
+                        leader.event.set_extra("mingle_woke_from_sleep", True)
+                        break
                 for item in batch[:-1]:
                     item.release()
                 if state.resume_after_rerun:

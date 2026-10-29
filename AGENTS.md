@@ -97,6 +97,20 @@
   Private/explicit wake batches and busy-session judgment bypass cooldown while
   keeping normal merge timing. Agent start/end wake the waiting judgment worker
   so it can recompute eligibility without resetting the merge window.
+- Natural sleep uses scheduler.sleep_seconds (default 180, zero disables automatic
+  sleep) and literal, case-sensitive scheduler.sleep_wake_keywords. Track the last
+  successful managed current-session native send or Mingle image send through the
+  normal tool-result hook; incoming messages and unsent final output do not reset
+  this clock. Startup and waking grant a full timeout window. State is per full
+  UMO and resets on restart. Sleep retains bounded pending tickets without judging
+  or admitting waiting work, and never interrupts the active Agent. Direct bot
+  mentions or keywords wake the session; private messages, @all and framework wake
+  prefixes alone do not. The wake batch must be judged, with all retained pending
+  records included and only its latest message marked new; the others are history.
+  A positive vote admits the complete waiting batch, including records beyond an
+  empty conversation's initial context limit. /mingle sleep and /s use native
+  administrator permissions and do not enter chat storage or scheduling. Sleep
+  invalidates in-flight judgments and prevents recovery from claiming sleeping work.
 - `src/decision.py` calls a judgment provider without tools. An empty provider ID
   follows AstrBot's current session provider; another configured provider may be
   selected in the plugin settings. Invalid decisions and failures mean silence.
@@ -245,7 +259,7 @@
   sessions. Clearing restores access to retained records. Do not change AstrBot's
   conversation history or the judgment-model history.
 - Private messages are enabled by default and use the same scheduler. WebChat
-  remains on its native flow. When idle, private and explicit wake/mention
+  remains on its native flow. When idle and awake, private and explicit wake/mention
   events bypass judgment and cooldown. While busy, evaluate them for control
   actions too, but preserve their reply admission unless the action is stop.
 - Recognized command handlers, including management commands, retain their

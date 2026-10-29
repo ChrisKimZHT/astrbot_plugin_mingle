@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import pytest_asyncio
 from astrbot.api import AstrBotConfig
-from astrbot.core.message.components import Plain
+from astrbot.core.message.components import At, AtAll, Plain
 from astrbot.core.message.message_event_result import ResultContentType
 from astrbot.core.pipeline.context_utils import call_handler
 from astrbot.core.pipeline.process_stage.stage import ProcessStage
@@ -123,6 +123,192 @@ async def test_private_and_mentions_bypass_judgment_and_bind_conversation(plugin
         assert event.get_extra("enable_streaming") is False
         await handler.aclose()
     plugin.context.llm_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wake_kind", ["mention", "keyword"])
+@pytest.mark.parametrize("reply", [False, True])
+async def test_sleep_wake_prompt_status_and_full_agent_batch(plugin, wake_kind, reply):
+    plugin.settings = replace(
+        plugin.settings, sleep_wake_keywords=("Mingle",), initial_context_messages=1
+    )
+    plugin.scheduler.settings = plugin.settings
+    plugin.scheduler.judge.settings = plugin.settings
+    plugin.context.llm_generate.return_value.completion_text = json.dumps(
+        {"should_reply": reply}
+    )
+    plugin.scheduler.sleep(make_event().unified_msg_origin)
+    first = make_event("1")
+    second = make_event("2")
+    tasks = []
+    for event in (first, second):
+        message_handler = plugin.on_message(event)
+        task = asyncio.create_task(anext(message_handler, None))
+        tasks.append(task)
+    try:
+        for _ in range(100):
+            state = plugin.scheduler.sessions[first.unified_msg_origin]
+            if len(state.pending) == 2:
+                break
+            await asyncio.sleep(0.001)
+        assert len(state.pending) == 2
+        plugin.context.llm_generate.assert_not_awaited()
+        wake = make_event("3")
+        if wake_kind == "mention":
+            wake.message_obj.message.append(At(qq="bot"))
+            wake.is_at_or_wake_command = True
+        else:
+            wake.message_str = "Mingle, hello"
+            wake.message_obj.message = [Plain(wake.message_str)]
+        handler = plugin.on_message(wake)
+        result = await asyncio.wait_for(anext(handler, None), 1)
+        assert isinstance(result, ProviderRequest) == reply
+        judgment_prompt = plugin.context.llm_generate.await_args.kwargs["prompt"]
+        judgment = json.loads(judgment_prompt)
+        assert [row["status"] for row in judgment["messages"]] == [
+            "history",
+            "history",
+            "new",
+        ]
+        if reply:
+            agent_history_json = result.prompt.split("\n", 1)[1]
+            agent_rows = json.loads(agent_history_json)
+            assert [row["text"] for row in agent_rows] == [
+                "message 1",
+                "message 2",
+                judgment["messages"][-1]["text"],
+            ]
+        await handler.aclose()
+        assert await asyncio.gather(*tasks) == [None, None]
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["private", "prefix", "all", "other", "case"])
+async def test_sleep_only_wakes_for_direct_bot_mention_or_literal_keyword(plugin, kind):
+    plugin.settings = replace(plugin.settings, sleep_wake_keywords=("Mingle",))
+    event = make_event(private=kind == "private")
+    event.is_at_or_wake_command = True
+    if kind == "all":
+        event.message_obj.message.append(AtAll())
+    elif kind == "other":
+        event.message_obj.message.append(At(qq="another-bot"))
+    elif kind == "case":
+        event.message_str = "mingle"
+    plugin.scheduler.sleep(event.unified_msg_origin)
+    task = asyncio.create_task(anext(plugin.on_message(event), None))
+    try:
+        for _ in range(100):
+            state = plugin.scheduler.sessions[event.unified_msg_origin]
+            if state.pending:
+                break
+            await asyncio.sleep(0.001)
+        assert state.sleeping
+        assert state.pending
+        assert not task.done()
+        plugin.context.llm_generate.assert_not_awaited()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,text", [("sleep", "mingle sleep"), ("sleep_alias", "s")])
+@pytest.mark.parametrize("private", [False, True])
+async def test_sleep_commands_use_native_admin_filters_and_bypass_storage(
+    plugin, name, text, private
+):
+    from astrbot.core.star.filter.permission import PermissionTypeFilter
+    from astrbot.core.star.star_handler import star_handlers_registry
+
+    plugin_handlers = star_handlers_registry.get_handlers_by_module_name(
+        MinglePlugin.__module__
+    )
+    metadata = next(item for item in plugin_handlers if item.handler_name == name)
+    permission = next(
+        item
+        for item in metadata.event_filters
+        if isinstance(item, PermissionTypeFilter)
+    )
+    command = next(
+        item for item in metadata.event_filters if isinstance(item, CommandFilter)
+    )
+    event = make_event(private=private)
+    assert not permission.filter(event, {})
+    event.role = "admin"
+    event.message_str = text
+    event.is_at_or_wake_command = True
+    assert permission.filter(event, {})
+    assert command.filter(event, {})
+    event.set_extra("activated_handlers", [metadata])
+    assert [value async for value in plugin.on_message(event)] == []
+    command_handler = getattr(plugin, name)
+    results = [value async for value in command_handler(event)]
+    assert "睡眠" in results[0].get_plain_text()
+    assert plugin.scheduler.sessions[event.unified_msg_origin].sleeping
+    assert await plugin.history.get(event.unified_msg_origin) == []
+    plugin.context.llm_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_only_successful_current_session_agent_sends_refresh_sleep_clock(
+    plugin, monkeypatch
+):
+    from mcp.types import CallToolResult, TextContent
+
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+    )
+    event = make_event()
+    event.set_extra("mingle_turn_id", "turn")
+    response = LLMResponse(role="assistant", completion_text="<finished>")
+    plugin.scheduler.record_agent_reply(event.unified_msg_origin)
+    clock.now = 200
+    await plugin.record_response(event, response)
+    assert (
+        plugin.scheduler.sessions[event.unified_msg_origin].last_agent_reply_at == 100
+    )
+    current_session_send_result = f"Message sent to session {event.unified_msg_origin}"
+    cases = [
+        (200, "send_message_to_user", "error: send failed", False, 100),
+        (200, "send_message_to_user", "Message sent to session other", False, 100),
+        (
+            200,
+            "send_message_to_user",
+            current_session_send_result,
+            True,
+            100,
+        ),
+        (
+            200,
+            "send_message_to_user",
+            current_session_send_result,
+            False,
+            200,
+        ),
+        (300, "mingle_generate_image", '{"sent": true}', False, 300),
+        (350, "mingle_edit_image", '{"error": "failed"}', False, 300),
+        (400, "mingle_edit_image", '{"sent": true}', False, 400),
+    ]
+    for send_time, tool_name, result_text, is_error, expected_reply_at in cases:
+        clock.now = send_time
+        tool = SimpleNamespace(name=tool_name)
+        tool_result = CallToolResult(
+            content=[TextContent(type="text", text=result_text)],
+            isError=is_error,
+        )
+        await plugin.track_agent_reply(
+            event,
+            tool,
+            {},
+            tool_result,
+        )
+        session_state = plugin.scheduler.sessions[event.unified_msg_origin]
+        assert session_state.last_agent_reply_at == expected_reply_at
 
 
 @pytest.mark.asyncio
@@ -893,6 +1079,7 @@ def test_management_commands_use_native_group_and_admin_permissions():
         "barrier",
         "whisper",
         "version",
+        "sleep",
     }
     assert not any(
         isinstance(item, PermissionTypeFilter) for item in root.event_filters
@@ -903,7 +1090,7 @@ def test_management_commands_use_native_group_and_admin_permissions():
     event.message_str = "mingle"
     with pytest.raises(ValueError) as error:
         group.filter(event, {})
-    for name in ("group", "debug", "barrier"):
+    for name in ("group", "debug", "barrier", "sleep"):
         assert name in str(error.value)
     assert "Args:" not in str(error.value)
     assert "Yields:" not in str(error.value)

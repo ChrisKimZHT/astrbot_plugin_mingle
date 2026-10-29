@@ -6,6 +6,11 @@ from mingle_tests_plugin.src.settings import Settings
     "config",
     [
         {"scheduler": {"debounce_seconds": -1}},
+        {"scheduler": {"sleep_seconds": -1}},
+        {"scheduler": {"sleep_seconds": float("nan")}},
+        {"scheduler": {"sleep_seconds": True}},
+        {"scheduler": {"sleep_wake_keywords": "name"}},
+        {"scheduler": {"sleep_wake_keywords": [None]}},
         {"scheduler": {"debounce_seconds": float("nan")}},
         {"scheduler": {"max_wait_seconds": 1, "debounce_seconds": 2}},
         {"judge": {"judge_timeout": 0}},
@@ -104,6 +109,20 @@ def test_grouped_settings_load_custom_values():
         toolbox_time_enabled=False,
         toolbox_image_generate_provider_id="image-provider",
     )
+
+
+def test_sleep_settings():
+    assert Settings().sleep_seconds == 180
+    settings = Settings.from_config(
+        {
+            "scheduler": {
+                "sleep_seconds": 0,
+                "sleep_wake_keywords": ["", "Mingle", "名字"],
+            }
+        }
+    )
+    assert settings.sleep_seconds == 0
+    assert settings.sleep_wake_keywords == ("Mingle", "名字")
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "3", None])

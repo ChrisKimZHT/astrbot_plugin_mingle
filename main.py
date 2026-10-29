@@ -9,8 +9,8 @@ from sys import maxsize
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star, StarTools
-from astrbot.core.agent.tool import ToolSet
-from astrbot.core.message.components import Plain
+from astrbot.core.agent.tool import FunctionTool, ToolSet
+from astrbot.core.message.components import At, Plain
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.filter.command import CommandFilter
@@ -97,6 +97,28 @@ class MinglePlugin(Star):
     async def whisper_alias(self, event: AstrMessageEvent) -> None:
         """Discard a whisper sent through the short command."""
         await self.whisper(event)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @mingle.command("sleep", desc="让当前会话立即睡眠，@ 或关键词唤醒")
+    async def sleep(
+        self, event: AstrMessageEvent
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """Put the current session to sleep without interrupting its active Agent."""
+        event.should_call_llm(True)
+        if not self.available or not self.settings.enabled:
+            yield event.plain_result("Mingle 尚未启用或初始化完成。")
+            return
+        self.scheduler.sleep(event.unified_msg_origin)
+        yield event.plain_result("当前会话已进入睡眠，直接 @ 或唤醒关键词可唤醒。")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("s", desc="/mingle sleep 的简写")
+    async def sleep_alias(
+        self, event: AstrMessageEvent
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """Put the current session to sleep through the short command."""
+        async for result in self.sleep(event):
+            yield result
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @mingle.command("barrier", desc="管理群聊记录边界：set 设置，find 查看，clear 清除")
@@ -376,7 +398,24 @@ class MinglePlugin(Star):
             if not await SessionServiceManager.should_process_llm_request(event):
                 return
             forced = event.is_private_chat() or event.is_at_or_wake_command
-            ticket = await self.scheduler.submit(event, record_id, forced)
+            wake_requested = False
+            for component in event.get_messages():
+                if not isinstance(component, At):
+                    continue
+                if str(component.qq) == str(event.get_self_id()):
+                    wake_requested = True
+                    break
+            if not wake_requested:
+                for keyword in self.settings.sleep_wake_keywords:
+                    if event.get_message_str().find(keyword) != -1:
+                        wake_requested = True
+                        break
+            ticket = await self.scheduler.submit(
+                event,
+                record_id,
+                forced,
+                wake=wake_requested,
+            )
             batch_ids = await ticket.ready
             if (
                 not batch_ids
@@ -542,14 +581,23 @@ class MinglePlugin(Star):
                 if match:
                     cursor = max(cursor, int(match.group(1)))
         if not saved:
-            return await self.history.get(
+            initial = await self.history.get(
                 event.unified_msg_origin,
                 limit=self.settings.initial_context_messages,
                 before_id=max(batch_ids) + 1,
                 boundary=boundary_group(event),
             )
+            if not event.get_extra("mingle_woke_from_sleep", False):
+                return initial
+            # A wake batch can exceed the initial context window. Include its
+            # oldest waiting input as well, while respecting the group boundary.
+            first_id = min(batch_ids)
+            if initial:
+                first_id = min(first_id, initial[0]["id"])
+            cursor = first_id - 1
         # Existing native conversations have no Mingle snapshot; start at this batch.
-        cursor = cursor or min(batch_ids) - 1
+        if saved:
+            cursor = cursor or min(batch_ids) - 1
         records = []
         while True:
             page = await self.history.get(
@@ -752,6 +800,53 @@ class MinglePlugin(Star):
                 )
         except Exception:
             self.logger.exception("Failed to record Mingle Agent response")
+
+    @filter.on_llm_tool_respond()
+    async def track_agent_reply(
+        self,
+        event: AstrMessageEvent,
+        tool: FunctionTool,
+        tool_args: dict | None,
+        tool_result: CallToolResult | None,
+    ) -> None:
+        """Start sleep timing when a managed send succeeds, including media replies.
+
+        Args:
+            event: Managed event owning the tool call.
+            tool: Native send tool or Mingle image tool that just finished.
+            tool_args: Model arguments supplied to that tool.
+            tool_result: Completed tool result; failures never refresh the timer.
+        """
+        if not self.available or not event.get_extra("mingle_turn_id"):
+            return
+        if tool_result is None or tool_result.isError:
+            return
+        if tool.name not in {
+            "send_message_to_user",
+            "mingle_generate_image",
+            "mingle_edit_image",
+        }:
+            return
+        for content in tool_result.content:
+            if content.type != "text":
+                continue
+            if tool.name == "send_message_to_user":
+                expected_send_result = (
+                    f"Message sent to session {event.unified_msg_origin}"
+                )
+                if content.text != expected_send_result:
+                    continue
+            else:
+                try:
+                    image_send_result = json.loads(content.text)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(image_send_result, dict):
+                    continue
+                if image_send_result.get("sent") is not True:
+                    continue
+            self.scheduler.record_agent_reply(event.unified_msg_origin)
+            return
 
     @filter.on_llm_response(priority=-maxsize - 1)
     async def suppress_final_reply(

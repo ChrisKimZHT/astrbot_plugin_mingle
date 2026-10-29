@@ -6,6 +6,8 @@ CONFIG_GROUPS = {
         "debounce_seconds",
         "max_wait_seconds",
         "cooldown_seconds",
+        "sleep_seconds",
+        "sleep_wake_keywords",
         "max_pending_messages",
     ),
     "judge": (
@@ -179,6 +181,8 @@ class Settings:
     debounce_seconds: float = 2.0
     max_wait_seconds: float = 6.0
     cooldown_seconds: float = 3.0
+    sleep_seconds: float = 180.0
+    sleep_wake_keywords: tuple[str, ...] = ()
     initial_context_messages: int = 30
     max_pending_messages: int = 100
     retention_days: int = 30
@@ -222,6 +226,13 @@ class Settings:
             ):
                 raise ValueError(f"{name} must be a list of session identifiers")
             values[name] = tuple(item.strip() for item in sessions if item.strip())
+        keywords = values.get("sleep_wake_keywords", ())
+        if not isinstance(keywords, (list, tuple)):
+            raise ValueError("sleep_wake_keywords must be a list of strings")
+        for keyword in keywords:
+            if not isinstance(keyword, str):
+                raise ValueError("sleep_wake_keywords must be a list of strings")
+        values["sleep_wake_keywords"] = tuple(item for item in keywords if item)
         settings = cls(**values)
         for name in (
             "enabled",
@@ -241,6 +252,7 @@ class Settings:
             "debounce_seconds",
             "max_wait_seconds",
             "cooldown_seconds",
+            "sleep_seconds",
         ):
             value = getattr(settings, name)
             if (
