@@ -7,6 +7,7 @@ CONFIG_GROUPS = {
         "max_wait_seconds",
         "cooldown_seconds",
         "sleep_seconds",
+        "sleep_backlog_minutes",
         "sleep_wake_keywords",
         "max_pending_messages",
     ),
@@ -183,6 +184,7 @@ class Settings:
     max_wait_seconds: float = 6.0
     cooldown_seconds: float = 3.0
     sleep_seconds: float = 180.0
+    sleep_backlog_minutes: float = 30.0
     sleep_wake_keywords: tuple[str, ...] = ()
     initial_context_messages: int = 30
     max_pending_messages: int = 100
@@ -254,6 +256,7 @@ class Settings:
             "max_wait_seconds",
             "cooldown_seconds",
             "sleep_seconds",
+            "sleep_backlog_minutes",
         ):
             value = getattr(settings, name)
             if (

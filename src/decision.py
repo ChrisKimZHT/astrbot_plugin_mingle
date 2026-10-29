@@ -47,6 +47,7 @@ class ReplyJudge:
         message_status: dict | None = None,
         new_message_ids: list[int] | None = None,
         waking: bool = False,
+        sleep_backlog: bool = False,
     ) -> bool:
         """Return an idle-session reply decision.
 
@@ -56,6 +57,7 @@ class ReplyJudge:
             message_status: Live scheduling state indexed by message record IDs.
             new_message_ids: Records triggering this evaluation.
             waking: Whether this batch wakes a sleeping session.
+            sleep_backlog: Whether this is a periodic sleeping-backlog review.
 
         Returns:
             Whether the model explicitly permits a reply.
@@ -66,6 +68,7 @@ class ReplyJudge:
             message_status=message_status,
             new_message_ids=new_message_ids,
             waking=waking,
+            sleep_backlog=sleep_backlog,
         )
         return decision.should_reply
 
@@ -77,6 +80,7 @@ class ReplyJudge:
         new_message_ids: list[int] | None = None,
         message_status: dict | None = None,
         waking: bool = False,
+        sleep_backlog: bool = False,
     ) -> ReplyDecision:
         """Ask a configured provider whether joining the conversation is useful.
 
@@ -86,6 +90,7 @@ class ReplyJudge:
             new_message_ids: Records whose arrival triggered this evaluation.
             message_status: Finished, active, queued, and pending record IDs.
             waking: Whether to use the wake-specific parallel request count.
+            sleep_backlog: Add conservative instructions for a timed backlog review.
 
         Returns:
             A validated reply and interruption decision. Failures and malformed
@@ -121,6 +126,13 @@ class ReplyJudge:
             system_prompt = (
                 self.settings.judge_prompt + self.settings.judge_prompt_append
             )
+            if sleep_backlog:
+                system_prompt += (
+                    "\n\nThis is a scheduled review of the sleeping session's message "
+                    "backlog. Try hard not to reply unless you are clearly "
+                    "interested in these topics. Prefer should_reply=false "
+                    "otherwise. Consider all supplied backlog messages in context."
+                )
             if persona and persona.get("prompt"):
                 # Keep persona in the stable system prefix, before changing chat
                 # data. Resolve it each time so edits and conversation switches apply.
@@ -198,7 +210,8 @@ class ReplyJudge:
             )
             requests = []
             parallel_requests = self.settings.judge_parallel_requests
-            if waking:
+            use_wake_parallel_requests = waking or sleep_backlog
+            if use_wake_parallel_requests:
                 parallel_requests = self.settings.judge_wake_parallel_requests
             for index in range(parallel_requests):
                 start_delay = index * JUDGE_REQUEST_START_INTERVAL_MS / 1000

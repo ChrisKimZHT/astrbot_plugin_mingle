@@ -25,6 +25,7 @@ class PendingMessage:
     ready: asyncio.Future[list[int] | None]
     received_at: float
     finished: asyncio.Event = field(default_factory=asyncio.Event)
+    backlog_sleep_revision: int | None = None
 
     def release(self) -> None:
         """Release a waiting handler without admitting another Agent turn."""
@@ -78,6 +79,7 @@ class SessionState:
     sleeping: bool = False
     waking: bool = False
     sleep_revision: int = 0
+    next_sleep_backlog_at: float = float("inf")
     resume_after_rerun: bool = False
     active_ids: list[int] = field(default_factory=list)
     finished: dict[int, str] = field(default_factory=dict)
@@ -101,7 +103,7 @@ class ChatScheduler:
         self.closed = False
 
     def sleep(self, key: str) -> None:
-        """Suspend judgment and waiting execution without stopping an active turn.
+        """Retain waiting work for a wake or timed review, preserving the active turn.
 
         Args:
             key: Full unified session identifier, respecting AstrBot isolation.
@@ -112,6 +114,8 @@ class ChatScheduler:
         state.sleeping = True
         state.waking = False
         state.sleep_revision += 1
+        backlog_interval_seconds = self.settings.sleep_backlog_minutes * 60
+        state.next_sleep_backlog_at = monotonic() + backlog_interval_seconds
         waiting_tickets = state.pending + state.judging + state.approved
         waiting_tickets = _waiting_messages(waiting_tickets)
         state.pending = sorted(
@@ -133,7 +137,7 @@ class ChatScheduler:
         self.logger.info("Mingle session entered sleep: %s", key)
 
     def record_agent_reply(self, key: str) -> None:
-        """Refresh inactivity only for an Agent reply, never for incoming chat.
+        """Refresh inactivity and wake an admitted backlog turn after a reply.
 
         Args:
             key: Session in which the managed Agent sent a reply.
@@ -142,6 +146,21 @@ class ChatScheduler:
             return
         state = self.sessions.setdefault(key, SessionState())
         state.last_agent_reply_at = monotonic()
+        if not state.sleeping:
+            state.changed.set()
+            return
+
+        active = state.active
+        if active is None:
+            state.changed.set()
+            return
+        if active.backlog_sleep_revision != state.sleep_revision:
+            state.changed.set()
+            return
+
+        state.sleeping = False
+        state.last_woken_at = state.last_agent_reply_at
+        self.logger.info("Mingle session woke after a backlog reply: %s", key)
         state.changed.set()
 
     def _check_sleep(self, key: str, state: SessionState) -> None:
@@ -191,12 +210,21 @@ class ChatScheduler:
         state = self.sessions.setdefault(key, SessionState())
         self._check_sleep(key, state)
         if state.sleeping and wake:
+            # Invalidate a timed review and return its snapshot to the wake batch.
+            state.sleep_revision += 1
+            waiting_tickets = state.pending + state.judging
+            waiting_tickets = _waiting_messages(waiting_tickets)
+            state.pending = sorted(
+                waiting_tickets,
+                key=lambda item: item.record_id,
+            )
+            state.judging = []
             state.sleeping = False
             state.waking = True
             state.last_woken_at = monotonic()
             self.logger.info("Mingle session woke from sleep: %s", key)
         state.pending.append(ticket)
-        if len(state.pending) > self.settings.max_pending_messages:
+        while len(state.pending) > self.settings.max_pending_messages:
             oldest = state.pending.pop(0)
             self._finish_records(state, [oldest.record_id], "merged")
             # Keep direct-address intent even when its original event is merged away.
@@ -231,8 +259,12 @@ class ChatScheduler:
                     continue
                 state.judging = batch
                 revision = state.sleep_revision
-                waking = state.waking
+                sleep_backlog = state.sleeping
+                waking = state.waking or sleep_backlog
                 state.waking = False
+                if sleep_backlog:
+                    backlog_interval_seconds = self.settings.sleep_backlog_minutes * 60
+                    state.next_sleep_backlog_at = monotonic() + backlog_interval_seconds
                 leader = batch[-1]
                 forced = not waking and any(item.forced for item in batch)
                 records = await self.history.get(
@@ -269,7 +301,13 @@ class ChatScheduler:
                     continue
 
                 decision = await self._evaluate_batch(
-                    key, state, batch, records, active, waking=waking
+                    key,
+                    state,
+                    batch,
+                    records,
+                    active,
+                    waking=waking,
+                    sleep_backlog=sleep_backlog,
                 )
                 self._check_sleep(key, state)
                 if revision != state.sleep_revision:
@@ -302,6 +340,10 @@ class ChatScheduler:
                         state.pending = []
                     if waking:
                         batch[-1].event.set_extra("mingle_woke_from_sleep", True)
+                    if sleep_backlog:
+                        for item in batch:
+                            item.backlog_sleep_revision = revision
+                            item.event.set_extra("mingle_woke_from_sleep", True)
                     state.approved.extend(batch)
                     while len(state.approved) > self.settings.max_pending_messages:
                         oldest = state.approved.pop(0)
@@ -338,6 +380,7 @@ class ChatScheduler:
 
         Recompute from original arrival times on every wakeup. An active Agent
         or direct-address ticket bypasses cooldown, but never merge timing.
+        Sleeping sessions wait for the backlog interval and an idle Agent instead.
 
         Args:
             key: Unified session identifier for sleep transitions.
@@ -348,16 +391,30 @@ class ChatScheduler:
             if not state.pending:
                 return
             self._check_sleep(key, state)
-            if state.sleeping:
-                state.changed.clear()
-                await state.changed.wait()
-                continue
             merge_at = min(
                 state.pending[-1].received_at + self.settings.debounce_seconds,
                 state.pending[0].received_at + self.settings.max_wait_seconds,
             )
             active = state.active
             busy = active is not None and not active.finished.is_set()
+            if state.sleeping:
+                state.changed.clear()
+                backlog_processing_disabled = self.settings.sleep_backlog_minutes == 0
+                if backlog_processing_disabled or busy:
+                    await state.changed.wait()
+                    continue
+                backlog_ready_at = max(state.next_sleep_backlog_at, merge_at)
+                backlog_delay = backlog_ready_at - monotonic()
+                if backlog_delay <= 0:
+                    return
+                try:
+                    await asyncio.wait_for(
+                        state.changed.wait(),
+                        timeout=backlog_delay,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                continue
             forced = state.waking or any(item.forced for item in state.pending)
             ready_at = merge_at
             if not busy and not forced:
@@ -390,6 +447,7 @@ class ChatScheduler:
         active: PendingMessage | None,
         *,
         waking: bool = False,
+        sleep_backlog: bool = False,
     ) -> ReplyDecision:
         """Build judgment context and evaluate against a captured active turn.
 
@@ -403,6 +461,7 @@ class ChatScheduler:
             records: Recent history already loaded for this batch.
             active: Active ticket captured after the initial history read.
             waking: Judge the latest trigger with every retained waiting record.
+            sleep_backlog: Permit a timed review while retaining the sleeping state.
 
         Returns:
             Reply admission and any requested control action. Idle direct-address
@@ -435,7 +494,9 @@ class ChatScheduler:
                     if item["id"] in missing_ids:
                         missing_records.append(item)
             records = sorted(records + missing_records, key=lambda item: item["id"])
-        if revision != state.sleep_revision or state.sleeping:
+        if revision != state.sleep_revision:
+            return ReplyDecision(False)
+        if state.sleeping and not sleep_backlog:
             return ReplyDecision(False)
         message_status = {
             "finished": [
@@ -462,6 +523,7 @@ class ChatScheduler:
                 message_status=message_status,
                 new_message_ids=new_message_ids,
                 waking=waking,
+                sleep_backlog=sleep_backlog,
             )
         if not waking and any(item.forced for item in batch):
             self.logger.info(
@@ -474,6 +536,7 @@ class ChatScheduler:
             message_status=message_status,
             new_message_ids=new_message_ids,
             waking=waking,
+            sleep_backlog=sleep_backlog,
         )
         return ReplyDecision(should_reply)
 
@@ -569,8 +632,15 @@ class ChatScheduler:
         try:
             while state.approved and not self.closed:
                 self._check_sleep(key, state)
-                if state.sleeping:
+                if state.sleeping and not state.approved:
                     break
+                if state.sleeping:
+                    backlog_leader = state.approved[-1]
+                    backlog_matches_sleep = (
+                        backlog_leader.backlog_sleep_revision == state.sleep_revision
+                    )
+                    if not backlog_matches_sleep:
+                        break
                 batch, state.approved = _waiting_messages(state.approved), []
                 if not batch:
                     state.resume_after_rerun = False

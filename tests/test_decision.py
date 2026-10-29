@@ -419,6 +419,43 @@ async def test_parallel_two_level_vote(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method", ["should_reply", "evaluate"])
+async def test_backlog_review_uses_wake_count_and_system_instructions(
+    context, event, method
+):
+    judge = ReplyJudge(
+        context,
+        Settings(judge_parallel_requests=1, judge_wake_parallel_requests=3),
+        logging.getLogger(),
+    )
+    evaluate = getattr(judge, method)
+    await evaluate(event, [], sleep_backlog=True)
+    assert context.llm_generate.await_count == 3
+    backlog_calls = list(context.llm_generate.await_args_list)
+    prompt = json.loads(backlog_calls[0].kwargs["prompt"])
+    assert "backlog_context" not in prompt
+    backlog_system = backlog_calls[0].kwargs["system_prompt"]
+    assert "Try hard not to reply" in backlog_system
+    assert "interested in these topics" in backlog_system
+    base_rules = judge.settings.judge_prompt + judge.settings.judge_prompt_append
+    assert backlog_system.startswith(base_rules + "\n\nThis is a scheduled review")
+    assert backlog_system.index("Try hard not to reply") < backlog_system.index(
+        "```quote"
+    )
+    backlog_prompts = {call.kwargs["prompt"] for call in backlog_calls}
+    assert len(backlog_prompts) == 1
+    backlog_system_prompts = {call.kwargs["system_prompt"] for call in backlog_calls}
+    assert len(backlog_system_prompts) == 1
+    await evaluate(event, [])
+    ordinary = context.llm_generate.await_args.kwargs
+    assert "backlog_context" not in json.loads(ordinary["prompt"])
+    assert "This is a scheduled review" not in ordinary["system_prompt"]
+    assert "Try hard not to reply" not in ordinary["system_prompt"]
+    assert judge.settings.judge_parallel_requests == 1
+    assert judge.settings.judge_wake_parallel_requests == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["should_reply", "evaluate"])
 @pytest.mark.parametrize("waking,expected_count", [(False, 2), (True, 3)])
 async def test_parallel_count_follows_batch_wake_state(
     context, event, method, waking, expected_count

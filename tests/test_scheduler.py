@@ -184,6 +184,182 @@ def clock(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["declined", "silent", "sent", "reslept"])
+async def test_sleep_backlog_timer_judges_full_batch_and_wakes_only_on_send(outcome):
+    async def get_records(key, *, limit, after_id=0, before_id=100):
+        rows = [{"id": record_id} for record_id in range(1, 4)]
+        rows = [row for row in rows if after_id < row["id"] < before_id]
+        if after_id:
+            return rows[:limit]
+        return rows[-limit:]
+
+    judge = SimpleNamespace(should_reply=AsyncMock(return_value=outcome != "declined"))
+    scheduler = ChatScheduler(
+        Settings(
+            debounce_seconds=0,
+            sleep_backlog_minutes=0.0005,
+            initial_context_messages=1,
+        ),
+        SimpleNamespace(get=get_records),
+        judge,
+        logging.getLogger(),
+    )
+    try:
+        scheduler.sleep("group")
+        tickets = []
+        for record_id in range(1, 4):
+            ticket = await scheduler.submit(Event(), record_id, True)
+            tickets.append(ticket)
+        latest = tickets[-1]
+        result = await asyncio.wait_for(latest.ready, 1)
+        if outcome == "declined":
+            assert result is None
+        else:
+            assert result == [1, 2, 3]
+        call = judge.should_reply.await_args
+        assert call.kwargs["waking"] is True
+        assert call.kwargs["sleep_backlog"] is True
+        assert call.kwargs["new_message_ids"] == [3]
+        assert [row["id"] for row in call.args[1]] == [1, 2, 3]
+        state = scheduler.sessions["group"]
+        assert state.sleeping
+        if outcome == "reslept":
+            scheduler.sleep("group")
+        if outcome in {"sent", "reslept"}:
+            scheduler.record_agent_reply("group")
+        expected_sleeping = outcome != "sent"
+        assert state.sleeping == expected_sleeping
+        latest.finished.set()
+        if state.execution_task:
+            await asyncio.wait_for(state.execution_task, 1)
+        assert state.sleeping == expected_sleeping
+        earlier_ready = [item.ready for item in tickets[:-1]]
+        earlier_results = await asyncio.gather(*earlier_ready)
+        assert earlier_results == [None, None]
+        judge.should_reply.assert_awaited_once()
+    finally:
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interval", [0, 30])
+async def test_sleep_backlog_interval_does_not_restart_on_arrivals(clock, interval):
+    judge = SimpleNamespace(should_reply=AsyncMock(return_value=False))
+    scheduler = ChatScheduler(
+        Settings(debounce_seconds=0, sleep_backlog_minutes=interval),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        judge,
+        logging.getLogger(),
+    )
+    try:
+        scheduler.sleep("group")
+        clock.now = 1899
+        first = await scheduler.submit(Event(), 1, True)
+        await asyncio.sleep(0)
+        judge.should_reply.assert_not_awaited()
+        clock.now = 1900
+        state = scheduler.sessions["group"]
+        state.changed.set()
+        if interval == 0:
+            await asyncio.sleep(0)
+            assert not first.ready.done()
+            judge.should_reply.assert_not_awaited()
+            return
+        assert await asyncio.wait_for(first.ready, 1) is None
+        await state.judgment_task
+        assert state.judgment_task.done()
+        assert state.sleeping
+        assert state.next_sleep_backlog_at == 3700
+        clock.now = 2000
+        second = await scheduler.submit(Event(), 2, True)
+        await asyncio.sleep(0)
+        judge.should_reply.assert_awaited_once()
+        assert not second.ready.done()
+        clock.now = 3700
+        state.changed.set()
+        assert await asyncio.wait_for(second.ready, 1) is None
+        assert judge.should_reply.await_count == 2
+        assert state.sleeping
+    finally:
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_sleep_backlog_waits_for_active_pipeline(clock):
+    judge = SimpleNamespace(should_reply=AsyncMock(return_value=True))
+    scheduler = ChatScheduler(
+        Settings(debounce_seconds=0),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        judge,
+        logging.getLogger(),
+    )
+    try:
+        active = await scheduler.submit(Event(), 1, True)
+        await active.ready
+        scheduler.sleep("group")
+        clock.now = 1900
+        backlog = await scheduler.submit(Event(), 2, False)
+        await asyncio.sleep(0)
+        judge.should_reply.assert_not_awaited()
+        assert not backlog.ready.done()
+        active.finished.set()
+        assert await asyncio.wait_for(backlog.ready, 1) == [2]
+        assert scheduler.sessions["group"].sleeping
+        backlog.finished.set()
+    finally:
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["sleep", "wake"])
+async def test_sleep_backlog_discards_stale_review_on_state_transition(
+    clock, transition
+):
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def should_reply(event, records, **kwargs):
+        if kwargs["sleep_backlog"]:
+            started.set()
+            await release.wait()
+            return True
+        return True
+
+    judge = SimpleNamespace(should_reply=AsyncMock(side_effect=should_reply))
+    scheduler = ChatScheduler(
+        Settings(debounce_seconds=0),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        judge,
+        logging.getLogger(),
+    )
+    try:
+        scheduler.sleep("group")
+        clock.now = 1900
+        backlog = await scheduler.submit(Event(), 1, False)
+        await asyncio.wait_for(started.wait(), 1)
+        state = scheduler.sessions["group"]
+        if transition == "sleep":
+            scheduler.sleep("group")
+            release.set()
+            await asyncio.sleep(0)
+            assert state.sleeping
+            assert state.pending == [backlog]
+            assert not backlog.ready.done()
+            assert state.approved == []
+            return
+        wake = await scheduler.submit(Event(), 2, True, wake=True)
+        release.set()
+        assert await asyncio.wait_for(wake.ready, 1) == [1, 2]
+        assert await backlog.ready is None
+        assert not state.sleeping
+        assert judge.should_reply.await_count == 2
+        assert judge.should_reply.await_args.kwargs["sleep_backlog"] is False
+        wake.finished.set()
+    finally:
+        release.set()
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
 async def test_sleep_timeout_tracks_agent_reply_not_new_messages(clock):
     judge = SimpleNamespace(should_reply=AsyncMock(return_value=False))
     scheduler = ChatScheduler(

@@ -192,6 +192,103 @@ async def test_sleep_wake_prompt_status_and_full_agent_batch(plugin, wake_kind, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome", ["declined", "silent", "failed_send", "sent", "image"]
+)
+async def test_sleep_backlog_uses_real_history_and_send_hook(
+    plugin, monkeypatch, outcome
+):
+    from mcp.types import CallToolResult, TextContent
+
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+    )
+    plugin.settings = replace(
+        plugin.settings,
+        initial_context_messages=1,
+        judge_parallel_requests=1,
+        judge_wake_parallel_requests=3,
+    )
+    plugin.scheduler.settings = plugin.settings
+    plugin.scheduler.judge.settings = plugin.settings
+    plugin.context.llm_generate.return_value.completion_text = json.dumps(
+        {"should_reply": outcome != "declined"}
+    )
+    events = [make_event(str(number)) for number in range(1, 4)]
+    handlers = [plugin.on_message(event) for event in events]
+    session_key = events[0].unified_msg_origin
+    plugin.scheduler.sleep(session_key)
+    tasks = []
+    for handler in handlers:
+        task = asyncio.create_task(anext(handler, None))
+        tasks.append(task)
+    try:
+        state = plugin.scheduler.sessions[session_key]
+        for _ in range(100):
+            if len(state.pending) == 3:
+                break
+            await asyncio.sleep(0.001)
+        assert len(state.pending) == 3
+        plugin.context.llm_generate.assert_not_awaited()
+        clock.now = 1900
+        state.changed.set()
+        results = await asyncio.wait_for(asyncio.gather(*tasks), 2)
+        assert results[:2] == [None, None]
+        assert plugin.context.llm_generate.await_count == 3
+        judgment_prompt = plugin.context.llm_generate.await_args.kwargs["prompt"]
+        judgment = json.loads(judgment_prompt)
+        assert "backlog_context" not in judgment
+        judgment_system = plugin.context.llm_generate.await_args.kwargs["system_prompt"]
+        assert "Try hard not to reply" in judgment_system
+        assert [row["status"] for row in judgment["messages"]] == [
+            "history",
+            "history",
+            "new",
+        ]
+        assert state.sleeping
+        if outcome == "declined":
+            assert results[-1] is None
+            return
+        request = results[-1]
+        assert isinstance(request, ProviderRequest)
+        agent_history_json = request.prompt.split("\n", 1)[1]
+        agent_rows = json.loads(agent_history_json)
+        assert [row["text"] for row in agent_rows] == [
+            "message 1",
+            "message 2",
+            "message 3",
+        ]
+        if outcome != "silent":
+            tool_name = "send_message_to_user"
+            text = f"Message sent to session {session_key}"
+            if outcome == "image":
+                tool_name = "mingle_generate_image"
+                text = '{"sent": true}'
+            tool_result = CallToolResult(
+                content=[TextContent(type="text", text=text)],
+                isError=outcome == "failed_send",
+            )
+            await plugin.track_agent_reply(
+                events[-1],
+                SimpleNamespace(name=tool_name),
+                {},
+                tool_result,
+            )
+        expected_sleeping = outcome not in {"sent", "image"}
+        assert state.sleeping == expected_sleeping
+        await handlers[-1].aclose()
+        await asyncio.wait_for(state.execution_task, 1)
+        assert state.sleeping == expected_sleeping
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for handler in handlers:
+            await handler.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["private", "prefix", "all", "other", "case"])
 async def test_sleep_only_wakes_for_direct_bot_mention_or_literal_keyword(plugin, kind):
     plugin.settings = replace(plugin.settings, sleep_wake_keywords=("Mingle",))

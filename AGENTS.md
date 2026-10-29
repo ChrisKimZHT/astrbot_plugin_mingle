@@ -102,8 +102,8 @@
   successful managed current-session native send or Mingle image send through the
   normal tool-result hook; incoming messages and unsent final output do not reset
   this clock. Startup and waking grant a full timeout window. State is per full
-  UMO and resets on restart. Sleep retains bounded pending tickets without judging
-  or admitting waiting work, and never interrupts the active Agent. Direct bot
+  UMO and resets on restart. Sleep retains bounded pending tickets for explicit
+  wakes or timed backlog reviews, and never interrupts the active Agent. Direct bot
   mentions or keywords wake the session; private messages, @all and framework wake
   prefixes alone do not. The wake batch must be judged, with all retained pending
   records included and only its latest message marked new; the others are history.
@@ -111,6 +111,18 @@
   empty conversation's initial context limit. /mingle sleep and /s use native
   administrator permissions and do not enter chat storage or scheduling. Sleep
   invalidates in-flight judgments and prevents recovery from claiming sleeping work.
+- scheduler.sleep_backlog_minutes (default 30, zero disables) schedules a
+  conservative review of bounded sleeping backlog without waking on arrivals.
+  Count from sleep entry or the previous review, wait for any active Agent to
+  unwind, and make no requests without pending input. Use wake judgment
+  concurrency and append backlog rules to the judgment system prompt, after
+  configured instructions and before the persona block, preferring silence unless
+  clearly interested. Keep chat data in user input. Retain wake-style full context
+  and latest-only new status.
+  Declined batches finish once; timed admission leaves the session sleeping until
+  a successful managed current-session send. A fresh sleep or explicit wake
+  invalidates stale reviews; manual sleep during an active backlog turn prevents
+  that turn's later sends from waking it again.
 - `src/decision.py` calls a judgment provider without tools. An empty provider ID
   follows AstrBot's current session provider; another configured provider may be
   selected in the plugin settings. Invalid decisions and failures mean silence.

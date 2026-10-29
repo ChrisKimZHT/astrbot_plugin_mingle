@@ -9,6 +9,11 @@ from mingle_tests_plugin.src.settings import Settings
         {"scheduler": {"sleep_seconds": -1}},
         {"scheduler": {"sleep_seconds": float("nan")}},
         {"scheduler": {"sleep_seconds": True}},
+        {"scheduler": {"sleep_backlog_minutes": -1}},
+        {"scheduler": {"sleep_backlog_minutes": float("nan")}},
+        {"scheduler": {"sleep_backlog_minutes": float("inf")}},
+        {"scheduler": {"sleep_backlog_minutes": True}},
+        {"scheduler": {"sleep_backlog_minutes": "30"}},
         {"scheduler": {"sleep_wake_keywords": "name"}},
         {"scheduler": {"sleep_wake_keywords": [None]}},
         {"scheduler": {"debounce_seconds": float("nan")}},
@@ -113,15 +118,18 @@ def test_grouped_settings_load_custom_values():
 
 def test_sleep_settings():
     assert Settings().sleep_seconds == 180
+    assert Settings().sleep_backlog_minutes == 30
     settings = Settings.from_config(
         {
             "scheduler": {
                 "sleep_seconds": 0,
+                "sleep_backlog_minutes": 0,
                 "sleep_wake_keywords": ["", "Mingle", "名字"],
             }
         }
     )
     assert settings.sleep_seconds == 0
+    assert settings.sleep_backlog_minutes == 0
     assert settings.sleep_wake_keywords == ("Mingle", "名字")
 
 
