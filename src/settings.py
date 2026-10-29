@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 
 CONFIG_GROUPS = {
@@ -8,6 +9,8 @@ CONFIG_GROUPS = {
         "cooldown_seconds",
         "sleep_minutes",
         "sleep_backlog_minutes",
+        "quiet_hours_start",
+        "quiet_hours_end",
         "sleep_wake_keywords",
         "max_pending_messages",
     ),
@@ -210,6 +213,8 @@ class Settings:
     cooldown_seconds: float = 3.0
     sleep_minutes: float = 5.0
     sleep_backlog_minutes: float = 30.0
+    quiet_hours_start: str = "22:00"
+    quiet_hours_end: str = "10:00"
     sleep_wake_keywords: tuple[str, ...] = ()
     initial_context_messages: int = 30
     max_pending_messages: int = 100
@@ -328,6 +333,13 @@ class Settings:
                 raise ValueError(f"{name} must be a string")
         if settings.initial_context_messages > 100:
             raise ValueError("initial_context_messages must not exceed 100")
+        for name in ("quiet_hours_start", "quiet_hours_end"):
+            value = getattr(settings, name)
+            if (
+                not isinstance(value, str)
+                or re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value) is None
+            ):
+                raise ValueError(f"{name} must be a time in HH:MM format")
         if settings.random_bubble_mean_minutes <= settings.random_bubble_min_minutes:
             raise ValueError(
                 "random_bubble_mean_minutes must exceed random_bubble_min_minutes"

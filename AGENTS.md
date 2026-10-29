@@ -127,6 +127,13 @@
 - `src/decision.py` calls a judgment provider without tools. An empty provider ID
   follows AstrBot's current session provider; another configured provider may be
   selected in the plugin settings. Invalid decisions and failures mean silence.
+- Scheduler quiet hours default to 22:00 inclusive through 10:00 exclusive in
+  the current AstrBot session timezone (UTC fallback). Configure HH:MM endpoints
+  under scheduler; equal endpoints disable quiet hours. Skip sleeping backlog
+  reviews during this period, retaining tickets until the next review outside
+  quiet hours. Resample due or queued random bubbles from quiet-hours end,
+  without changing the last-send clock. Recheck after asynchronous judgment and
+  before admission; ordinary replies and explicit wakes remain unaffected.
 - Use shared formatting for judgment and generator history inputs: format Unix timestamps as
   readable date/time with the configured AstrBot timezone and numeric offset
   (UTC fallback), shorten sender IDs to their last eight characters, and omit

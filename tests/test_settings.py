@@ -14,6 +14,13 @@ from mingle_tests_plugin.src.settings import Settings
         {"scheduler": {"sleep_backlog_minutes": float("inf")}},
         {"scheduler": {"sleep_backlog_minutes": True}},
         {"scheduler": {"sleep_backlog_minutes": "30"}},
+        {"scheduler": {"quiet_hours_start": None}},
+        {"scheduler": {"quiet_hours_start": "24:00"}},
+        {"scheduler": {"quiet_hours_start": "9:00"}},
+        {"scheduler": {"quiet_hours_start": "22:60"}},
+        {"scheduler": {"quiet_hours_end": 10}},
+        {"scheduler": {"quiet_hours_end": "10:00:00"}},
+        {"scheduler": {"quiet_hours_end": " 10:00"}},
         {"scheduler": {"sleep_wake_keywords": "name"}},
         {"scheduler": {"sleep_wake_keywords": [None]}},
         {"scheduler": {"debounce_seconds": float("nan")}},
@@ -144,6 +151,16 @@ def test_sleep_settings():
     assert settings.sleep_minutes == 0
     assert settings.sleep_backlog_minutes == 0
     assert settings.sleep_wake_keywords == ("Mingle", "名字")
+
+
+def test_quiet_hours_configuration():
+    assert Settings().quiet_hours_start == "22:00"
+    assert Settings().quiet_hours_end == "10:00"
+    settings = Settings.from_config(
+        {"scheduler": {"quiet_hours_start": "09:00", "quiet_hours_end": "17:30"}}
+    )
+    assert settings.quiet_hours_start == "09:00"
+    assert settings.quiet_hours_end == "17:30"
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "3", None])

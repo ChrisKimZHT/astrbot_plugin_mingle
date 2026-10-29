@@ -1,8 +1,11 @@
 import importlib.util
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+import pytest
 
 # Framework imports initialize runtime files before fixtures run. Isolate only
 # this test process from the checkout and any configured production data root.
@@ -30,3 +33,15 @@ spec = importlib.util.spec_from_file_location(
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
+
+
+@pytest.fixture(autouse=True)
+def scheduler_wall_clock(monkeypatch):
+    """Keep scheduling tests independent of the actual time of day."""
+
+    class Daytime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 30, 12, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.datetime", Daytime)

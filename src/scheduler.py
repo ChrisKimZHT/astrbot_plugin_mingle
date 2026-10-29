@@ -2,8 +2,11 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from math import ceil
 from random import expovariate
 from time import monotonic
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from astrbot.api.event import AstrMessageEvent
 
@@ -103,6 +106,7 @@ class ChatScheduler:
         judge: ReplyJudge,
         logger: logging.Logger,
         queue_bubble: Callable[[str, int], Awaitable[None]] | None = None,
+        get_config: Callable[..., dict] | None = None,
     ) -> None:
         self.settings = settings
         self.history = history
@@ -111,6 +115,66 @@ class ChatScheduler:
         self.sessions: dict[str, SessionState] = {}
         self.closed = False
         self.queue_bubble = queue_bubble
+        self.get_config = get_config
+
+    def _quiet_seconds_remaining(self, key: str) -> float:
+        """Return time until quiet hours end in the current session timezone.
+
+        The start is inclusive and the end exclusive. Equal endpoints disable
+        quiet hours. Resolve the profile on every check; invalid zones use UTC.
+
+        Args:
+            key: Full session UMO used to resolve AstrBot's timezone.
+
+        Returns:
+            Remaining seconds, or zero outside quiet hours.
+        """
+        start = self.settings.quiet_hours_start
+        end = self.settings.quiet_hours_end
+        if start == end:
+            return 0.0
+        timezone_name = None
+        if self.get_config is not None:
+            timezone_name = self.get_config(umo=key).get("timezone")
+        try:
+            session_timezone = ZoneInfo(timezone_name or "UTC")
+        except (ZoneInfoNotFoundError, ValueError, TypeError):
+            session_timezone = timezone.utc
+        now = datetime.now(session_timezone)
+        current = now.strftime("%H:%M")
+        if start < end:
+            quiet = start <= current < end
+        else:
+            quiet = current >= start or current < end
+        if not quiet:
+            return 0.0
+        hour, minute = map(int, end.split(":"))
+        end_date = now.date()
+        if start > end and current >= start:
+            end_date += timedelta(days=1)
+        quiet_end = datetime.combine(
+            end_date, datetime.min.time(), tzinfo=session_timezone
+        ).replace(hour=hour, minute=minute)
+        return max(0.0, quiet_end.timestamp() - now.timestamp())
+
+    def _defer_quiet_batch(
+        self, state: SessionState, batch: list[PendingMessage]
+    ) -> None:
+        """Return a quiet-hour batch to the bounded pending queue.
+
+        Args:
+            state: Session retaining input until a later review or explicit wake.
+            batch: Judging or approved tickets whose admission was postponed.
+        """
+        state.pending = sorted(
+            _waiting_messages(batch + state.pending), key=lambda item: item.record_id
+        )
+        while len(state.pending) > self.settings.max_pending_messages:
+            oldest = state.pending.pop(0)
+            self._finish_records(state, [oldest.record_id], "merged")
+            state.pending[0].forced |= oldest.forced
+            oldest.release()
+        state.changed.set()
 
     def watch_random_bubbles(self, key: str) -> None:
         """Start one independent random clock for an eligible shared group.
@@ -145,11 +209,14 @@ class ChatScheduler:
             await asyncio.gather(state.bubble_task, return_exceptions=True)
             state.bubble_task = None
 
-    def _reset_bubble_deadline(self, state: SessionState) -> None:
+    def _reset_bubble_deadline(
+        self, state: SessionState, *, anchor_at: float | None = None
+    ) -> None:
         """Draw a shifted exponential deadline anchored to the last real send.
 
         Args:
             state: Session whose previous queued trigger must become stale.
+            anchor_at: Quiet-hours end when postponing a skipped opportunity.
         """
         minimum = self.settings.random_bubble_min_minutes * 60
         random_mean = (
@@ -157,9 +224,9 @@ class ChatScheduler:
             - self.settings.random_bubble_min_minutes
         ) * 60
         state.bubble_revision += 1
-        state.next_bubble_at = (
-            state.last_agent_reply_at + minimum + expovariate(1 / random_mean)
-        )
+        if anchor_at is None:
+            anchor_at = state.last_agent_reply_at
+        state.next_bubble_at = anchor_at + minimum + expovariate(1 / random_mean)
         state.changed.set()
 
     async def _random_bubbles(self, key: str, state: SessionState) -> None:
@@ -187,6 +254,10 @@ class ChatScheduler:
                     await asyncio.wait_for(state.changed.wait(), timeout=delay)
                 except asyncio.TimeoutError:
                     pass
+                continue
+            quiet_delay = self._quiet_seconds_remaining(key)
+            if quiet_delay > 0:
+                self._reset_bubble_deadline(state, anchor_at=monotonic() + quiet_delay)
                 continue
             if state.active is not None or state.approved or state.judging:
                 await state.changed.wait()
@@ -222,6 +293,10 @@ class ChatScheduler:
             if not self.settings.random_bubble_enabled:
                 return None
             if revision != state.bubble_revision or event.is_stopped():
+                return None
+            quiet_delay = self._quiet_seconds_remaining(key)
+            if quiet_delay > 0:
+                self._reset_bubble_deadline(state, anchor_at=monotonic() + quiet_delay)
                 return None
             state.changed.clear()
             if state.active is not None or state.approved or state.judging:
@@ -462,6 +537,11 @@ class ChatScheduler:
                     state.judging = []
                     batch = []
                     continue
+                if sleep_backlog and self._quiet_seconds_remaining(key) > 0:
+                    self._defer_quiet_batch(state, batch)
+                    state.judging = []
+                    batch = []
+                    continue
 
                 # Snapshot only after IO: the previous Agent may have finished
                 # during the history read, starting a fresh cooldown.
@@ -497,6 +577,11 @@ class ChatScheduler:
                     continue
                 # Recovery may have claimed this batch while judgment awaited IO.
                 if leader.ready.done():
+                    state.judging = []
+                    batch = []
+                    continue
+                if sleep_backlog and self._quiet_seconds_remaining(key) > 0:
+                    self._defer_quiet_batch(state, batch)
                     state.judging = []
                     batch = []
                     continue
@@ -589,7 +674,17 @@ class ChatScheduler:
                 backlog_ready_at = max(state.next_sleep_backlog_at, merge_at)
                 backlog_delay = backlog_ready_at - monotonic()
                 if backlog_delay <= 0:
-                    return
+                    quiet_delay = self._quiet_seconds_remaining(key)
+                    if quiet_delay <= 0:
+                        return
+                    # Skip this review and subsequent quiet-hour slots without
+                    # releasing retained input or making model requests.
+                    interval = self.settings.sleep_backlog_minutes * 60
+                    skipped_intervals = max(1, ceil(quiet_delay / interval))
+                    state.next_sleep_backlog_at = (
+                        monotonic() + skipped_intervals * interval
+                    )
+                    backlog_delay = state.next_sleep_backlog_at - monotonic()
                 try:
                     await asyncio.wait_for(
                         state.changed.wait(),
@@ -681,6 +776,8 @@ class ChatScheduler:
         if revision != state.sleep_revision:
             return ReplyDecision(False)
         if state.sleeping and not sleep_backlog:
+            return ReplyDecision(False)
+        if sleep_backlog and self._quiet_seconds_remaining(key) > 0:
             return ReplyDecision(False)
         message_status = {
             "finished": [
@@ -831,6 +928,15 @@ class ChatScheduler:
                         backlog_leader.backlog_sleep_revision == state.sleep_revision
                     )
                     if not backlog_matches_sleep:
+                        break
+                    if self._quiet_seconds_remaining(key) > 0:
+                        self._defer_quiet_batch(state, state.approved)
+                        state.approved = []
+                        if state.judgment_task is None or state.judgment_task.done():
+                            state.judgment_task = asyncio.create_task(
+                                self._judge_pending(key, state)
+                            )
+                        state.changed.set()
                         break
                 batch, state.approved = _waiting_messages(state.approved), []
                 if not batch:

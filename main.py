@@ -94,6 +94,7 @@ class MinglePlugin(Star):
             ReplyJudge(context, self.settings, self.logger, self.debug_dumper),
             self.logger,
             queue_bubble=self._queue_random_bubble,
+            get_config=self.context.get_config,
         )
         self.bubble_self_ids: dict[str, str] = {}
         self.cleanup_task: asyncio.Task | None = None
