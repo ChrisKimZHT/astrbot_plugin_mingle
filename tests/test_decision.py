@@ -190,7 +190,7 @@ async def test_judgment_history_is_compact_without_mutating_original_records(
     original = copy.deepcopy(messages)
     judge = ReplyJudge(context, Settings(), logging.getLogger())
     assert await judge.should_reply(event, messages)
-    record = json.loads(context.llm_generate.call_args.kwargs["prompt"])[0]
+    record = json.loads(context.llm_generate.call_args.kwargs["prompt"])["messages"][0]
     assert record["timestamp"] == "1970-01-01 08:00:00+08:00"
     assert record["sender_id"] == "56789012"
     assert "platform_message_id" not in record
@@ -205,7 +205,7 @@ async def test_judgment_history_is_compact_without_mutating_original_records(
 async def test_short_or_missing_sender_ids_are_preserved(context, event, sender):
     judge = ReplyJudge(context, Settings(), logging.getLogger())
     assert await judge.should_reply(event, [{"sender_id": sender, "timestamp": None}])
-    record = json.loads(context.llm_generate.call_args.kwargs["prompt"])[0]
+    record = json.loads(context.llm_generate.call_args.kwargs["prompt"])["messages"][0]
     assert record["sender_id"] == (str(sender)[-8:] if sender is not None else None)
     assert record["timestamp"] is None
 
@@ -216,7 +216,9 @@ async def test_invalid_timezone_falls_back_to_readable_utc(context, event):
     judge = ReplyJudge(context, Settings(), logging.getLogger())
     assert await judge.should_reply(event, [{"timestamp": 0}])
     assert (
-        json.loads(context.llm_generate.call_args.kwargs["prompt"])[0]["timestamp"]
+        json.loads(context.llm_generate.call_args.kwargs["prompt"])["messages"][0][
+            "timestamp"
+        ]
         == "1970-01-01 00:00:00+00:00"
     )
 
@@ -289,3 +291,72 @@ async def test_busy_context_is_explicit_without_changing_the_system_prefix(
         4
     ]
     assert records[4]["text"] == "Message 4"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "age, expected",
+    [
+        (0, "0 seconds"),
+        (59, "59 seconds"),
+        (60, "1 minute"),
+        (3599, "59 minutes"),
+        (3600, "1 hour"),
+        (86400, "1 day"),
+        (172800, "2 days"),
+        (-10, "0 seconds"),
+        (None, "unknown"),
+        (float("nan"), "unknown"),
+    ],
+)
+async def test_judgment_time_context(context, event, monkeypatch, age, expected):
+    from datetime import datetime, timezone
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 29, 7, 30, 45, tzinfo=timezone.utc)
+
+    monkeypatch.setattr("mingle_tests_plugin.src.decision.datetime", FixedDatetime)
+    now = FixedDatetime.now().timestamp()
+    messages = [
+        {"id": 1, "timestamp": now - 999999},
+        {"id": 2, "timestamp": None if age is None else now - age},
+        {"id": 3, "timestamp": now - 1},
+        {"id": 4, "timestamp": now},
+    ]
+    judge = ReplyJudge(context, Settings(), logging.getLogger())
+    assert await judge.should_reply(
+        event,
+        messages,
+        new_message_ids=[3, 4],
+        message_status={"active": [2]},
+    )
+    request = context.llm_generate.call_args.kwargs
+    payload = json.loads(request["prompt"])
+    assert list(payload) == ["messages", "time_context"]
+    assert payload["time_context"].startswith(
+        "Current time: 2026-10-29 15:30:45+08:00\n"
+        "Time since the last message before the new messages: "
+    )
+    assert payload["time_context"].split(": ")[-1].startswith(expected)
+    assert "Current time:" not in request["system_prompt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "messages,new_ids",
+    [
+        ([], []),
+        ([{"id": 1, "timestamp": 0}], [1]),
+        ([{"id": 1, "timestamp": 0}], []),
+        ([{"id": 1, "timestamp": 0}], [2]),
+    ],
+)
+async def test_time_context_without_previous_message(context, event, messages, new_ids):
+    judge = ReplyJudge(context, Settings(), logging.getLogger())
+    assert await judge.should_reply(event, messages, new_message_ids=new_ids)
+    payload = json.loads(context.llm_generate.call_args.kwargs["prompt"])
+    assert payload["time_context"].endswith(
+        "unknown (no valid message timestamp before new messages)"
+    )

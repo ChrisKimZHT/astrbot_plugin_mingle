@@ -250,7 +250,12 @@
   pipeline for normal rerun/stop: history saving must finish. Recheck active
   event identity after judgment; a late result cannot stop a newer turn. Do not
   patch same-sender follow-up capture or stop every event in the shared session.
-- Judgment user input includes only messages. Each supplied message
+- Judgment user input includes messages followed by time_context with the current
+  session-local time (UTC fallback) and the age of the last message preceding
+  this judgment's first new message in
+  whole seconds, minutes, hours or days. Missing/invalid timestamps yield unknown;
+  future timestamps yield zero seconds. Keep this dynamic context out of system.
+  Each supplied message
   has only one scheduling field, status: new (this judgment's input), queued
   (reply approved), processing (active Agent batch), or history (other context).
   Do not send per-message is_new/sent_to_agent flags or top-level

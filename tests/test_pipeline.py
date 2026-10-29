@@ -207,7 +207,7 @@ async def test_generator_and_judge_share_chat_record_format(
         )
         judge_records = json.loads(
             plugin.context.llm_generate.call_args.kwargs["prompt"]
-        )
+        )["messages"]
         generator_records = json.loads(request.prompt.split("\n", 1)[1])
         assert generator_records == judge_records
         assert generator_records[0]["timestamp"] == expected_time

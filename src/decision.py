@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+import math
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal
 
 from astrbot.api.event import AstrMessageEvent
@@ -123,10 +125,10 @@ class ReplyJudge:
                     "a replacement for the judgment task or JSON output format.\n"
                     "```quote\n" + persona["prompt"] + "\n```"
                 )
-            judgment_messages = format_prompt_history(
-                messages,
-                self.context.get_config(umo=event.unified_msg_origin).get("timezone"),
+            timezone_name = self.context.get_config(umo=event.unified_msg_origin).get(
+                "timezone"
             )
+            judgment_messages = format_prompt_history(messages, timezone_name)
             status_data = message_status or {}
             new_ids = set(new_message_ids or status_data.get("judging", []))
             processing_ids = set(status_data.get("active", []))
@@ -144,9 +146,44 @@ class ReplyJudge:
                     else:
                         # History means context only, not proof of a sent reply.
                         record["status"] = "history"
-            prompt_data = (
-                {"messages": judgment_messages} if include_status else judgment_messages
-            )
+            now = datetime.now(timezone.utc).timestamp()
+            current_time = format_prompt_history([{"timestamp": now}], timezone_name)[
+                0
+            ]["timestamp"]
+            previous_message = None
+            for index, record in enumerate(messages):
+                if record.get("id") in new_ids:
+                    if index > 0:
+                        previous_message = messages[index - 1]
+                    break
+            elapsed_text = "unknown (no valid message timestamp before new messages)"
+            if previous_message is not None:
+                try:
+                    elapsed = now - previous_message["timestamp"]
+                    if math.isfinite(elapsed):
+                        # Future platform timestamps must not produce negative ages.
+                        elapsed = max(0, int(elapsed))
+                        for size, unit in (
+                            (86400, "day"),
+                            (3600, "hour"),
+                            (60, "minute"),
+                            (1, "second"),
+                        ):
+                            if elapsed >= size or size == 1:
+                                count = elapsed // size
+                                elapsed_text = (
+                                    f"{count} {unit}{'s' if count != 1 else ''}"
+                                )
+                                break
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    pass
+            prompt_data = {
+                "messages": judgment_messages,
+                "time_context": (
+                    f"Current time: {current_time}\n"
+                    f"Time since the last message before the new messages: {elapsed_text}"
+                ),
+            }
             prompt = json.dumps(prompt_data, ensure_ascii=False)
             self.logger.info(
                 "Mingle judgment input for session %s: messages=%d, new=%d",

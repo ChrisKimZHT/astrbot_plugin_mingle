@@ -148,8 +148,11 @@ async def test_judge_dumps_input_and_output_or_error(dumper, event, failure):
     assert "Be friendly" in request["system_prompt"]
     assert request["prompt"] == context.llm_generate.call_args.kwargs["prompt"]
     assert isinstance(request["prompt"], str)
-    assert json.loads(request["prompt"]) == messages
-    assert json.loads(context.llm_generate.call_args.kwargs["prompt"]) == messages
+    assert json.loads(request["prompt"])["messages"] == messages
+    assert (
+        json.loads(context.llm_generate.call_args.kwargs["prompt"])["messages"]
+        == messages
+    )
 
 
 class DebugHTMLParser(HTMLParser):
