@@ -1,7 +1,7 @@
 name: astrbot_plugin_mingle
 display_name: Mingle
 desc: Natural group participation with unified chat scheduling, searchable history, and cached images.
-version: v0.1.0
+version: v0.2.0
 author: ChrisKimZHT
 repo: https://github.com/ChrisKimZHT/astrbot_plugin_mingle
 astrbot_version: '>=4.29.3'
