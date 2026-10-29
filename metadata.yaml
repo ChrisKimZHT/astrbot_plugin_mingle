@@ -4,4 +4,3 @@ desc: Natural group participation with unified chat scheduling, searchable histo
 version: v0.2.0
 author: ChrisKimZHT
 repo: https://github.com/ChrisKimZHT/astrbot_plugin_mingle
-astrbot_version: '>=4.29.3'
