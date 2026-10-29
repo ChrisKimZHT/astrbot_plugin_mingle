@@ -413,7 +413,10 @@ be verified separately with configured credentials; tests do not contact them.
   default 1, under experimental. Pass the scheduler's captured waking flag to
   the judge; do not infer it from mentions or mutate shared settings. Each judgment sends
   N concurrent requests with identical resolved inputs and independent timeouts
-  and debug request IDs, then waits for all results. Failed or invalid requests
+  and debug request IDs, then waits for all results. Start requests at 200 ms
+  offsets, with the first starting immediately; stagger delays precede debug
+  capture and per-request timeout. Batch cancellation cancels delayed requests too.
+  Failed or invalid requests
   contribute false/wait votes. Vote should_reply first, then count all action
   votes compatible with that winner (wait plus rerun for true, stop for false).
   Choose uniformly among tied highest counts at each level.

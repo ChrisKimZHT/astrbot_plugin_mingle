@@ -436,13 +436,29 @@ async def test_parallel_count_follows_batch_wake_state(
 
 
 @pytest.mark.asyncio
-async def test_parallel_requests_overlap_and_have_distinct_debug_ids(context, event):
+@pytest.mark.parametrize("waking", [False, True])
+async def test_parallel_requests_overlap_and_have_distinct_debug_ids(
+    context, event, monkeypatch, waking
+):
+    interval_ms = 20
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.decision.JUDGE_REQUEST_START_INTERVAL_MS", interval_ms
+    )
+    start_gates = {0.02: asyncio.Event(), 0.04: asyncio.Event()}
+
+    async def stagger_sleep(delay):
+        await start_gates[delay].wait()
+
+    sleep = AsyncMock(side_effect=stagger_sleep)
+    monkeypatch.setattr("mingle_tests_plugin.src.decision.asyncio.sleep", sleep)
     started = 0
+    start_notifications = [asyncio.Event() for _ in range(3)]
     ready = asyncio.Event()
 
     async def generate(**kwargs):
         nonlocal started
         started += 1
+        start_notifications[started - 1].set()
         if started == 3:
             ready.set()
         await ready.wait()
@@ -451,9 +467,29 @@ async def test_parallel_requests_overlap_and_have_distinct_debug_ids(context, ev
     context.llm_generate.side_effect = generate
     debug = SimpleNamespace(dump=AsyncMock())
     judge = ReplyJudge(
-        context, Settings(judge_parallel_requests=3), logging.getLogger(), debug
+        context,
+        Settings(
+            judge_parallel_requests=3,
+            judge_wake_parallel_requests=3,
+            judge_timeout=1,
+        ),
+        logging.getLogger(),
+        debug,
     )
-    assert (await asyncio.wait_for(judge.evaluate(event, []), 2)).should_reply
+    task = asyncio.create_task(judge.evaluate(event, [], waking=waking))
+    try:
+        await asyncio.wait_for(start_notifications[0].wait(), 2)
+        assert started == 1
+        start_gates[0.02].set()
+        await asyncio.wait_for(start_notifications[1].wait(), 2)
+        assert started == 2
+        start_gates[0.04].set()
+        decision = await asyncio.wait_for(task, 2)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert decision.should_reply
+    assert [call.args[0] for call in sleep.await_args_list] == [0.02, 0.04]
     calls = debug.dump.call_args_list
     inputs = [call.args for call in calls if call.args[2] == "input"]
     outputs = [call.args for call in calls if call.args[2] == "output"]
@@ -461,6 +497,51 @@ async def test_parallel_requests_overlap_and_have_distinct_debug_ids(context, ev
     assert len({args[4] for args in inputs}) == 3
     assert {args[4] for args in inputs} == {args[4] for args in outputs}
     assert all(args[3] == inputs[0][3] for args in inputs)
+
+
+@pytest.mark.asyncio
+async def test_stagger_delay_precedes_request_timeout_and_debug_capture(context, event):
+    debug = SimpleNamespace(dump=AsyncMock())
+    judge = ReplyJudge(
+        context, Settings(judge_timeout=0.01), logging.getLogger(), debug
+    )
+    decision = await judge._evaluate_request(
+        event,
+        "default",
+        "chat input",
+        "instructions",
+        start_delay=0.04,
+    )
+    assert decision.should_reply
+    assert [call.args[2] for call in debug.dump.await_args_list] == ["input", "output"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_cancellation_prevents_delayed_requests_from_starting(
+    context, event
+):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def generate(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    context.llm_generate.side_effect = generate
+    judge = ReplyJudge(
+        context, Settings(judge_parallel_requests=3), logging.getLogger()
+    )
+    task = asyncio.create_task(judge.evaluate(event, []))
+    await asyncio.wait_for(started.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
+    await asyncio.sleep(0.45)
+    assert context.llm_generate.await_count == 1
 
 
 @pytest.mark.asyncio

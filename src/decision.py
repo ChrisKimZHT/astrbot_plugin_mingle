@@ -16,6 +16,8 @@ from .debug import DebugDumper
 from .settings import Settings
 from .utils.history_formatting import format_prompt_history
 
+JUDGE_REQUEST_START_INTERVAL_MS = 200
+
 
 @dataclass(frozen=True)
 class ReplyDecision:
@@ -198,9 +200,16 @@ class ReplyJudge:
             parallel_requests = self.settings.judge_parallel_requests
             if waking:
                 parallel_requests = self.settings.judge_wake_parallel_requests
-            for _ in range(parallel_requests):
+            for index in range(parallel_requests):
+                start_delay = index * JUDGE_REQUEST_START_INTERVAL_MS / 1000
                 requests.append(
-                    self._evaluate_request(event, provider_id, prompt, system_prompt)
+                    self._evaluate_request(
+                        event,
+                        provider_id,
+                        prompt,
+                        system_prompt,
+                        start_delay=start_delay,
+                    )
                 )
             decisions = await asyncio.gather(*requests)
             if len(decisions) == 1:
@@ -252,6 +261,8 @@ class ReplyJudge:
         provider_id: str,
         prompt: str,
         system_prompt: str,
+        *,
+        start_delay: float = 0.0,
     ) -> ReplyDecision:
         """Run and validate one independently timed and debugged judgment request.
 
@@ -260,10 +271,13 @@ class ReplyJudge:
             provider_id: Resolved provider shared by this judgment's requests.
             prompt: Exact serialized user input shared by all requests.
             system_prompt: Resolved instructions and persona.
+            start_delay: Stagger delay before debug capture and request timeout begin.
 
         Returns:
             A validated decision, or a silent wait on failure.
         """
+        if start_delay > 0:
+            await asyncio.sleep(start_delay)
         request_id = None
         try:
             request_id = uuid.uuid4().hex
