@@ -118,6 +118,7 @@ class MinglePlugin(Star):
                 # Bare group IDs acquire a platform when their first message arrives.
                 continue
             if session.message_type == MessageType.GROUP_MESSAGE:
+                self.scheduler.initialize_session(key)
                 self.scheduler.watch_random_bubbles(key)
         self.logger.info(
             "Mingle initialized with %d configured group sessions",
@@ -183,7 +184,7 @@ class MinglePlugin(Star):
         await self.whisper(event)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @mingle.command("sleep", desc="让当前会话立即睡眠，@ 或关键词唤醒")
+    @mingle.command("sleep", desc="让当前群聊立即睡眠，@ 或关键词唤醒")
     async def sleep(
         self, event: AstrMessageEvent
     ) -> AsyncGenerator[MessageEventResult, None]:
@@ -191,6 +192,9 @@ class MinglePlugin(Star):
         event.should_call_llm(True)
         if not self.available or not self.settings.enabled:
             yield event.plain_result("Mingle 尚未启用或初始化完成。")
+            return
+        if event.is_private_chat():
+            yield event.plain_result("私聊不使用睡眠机制，请在群聊中使用此命令。")
             return
         self.scheduler.sleep(event.unified_msg_origin)
         yield event.plain_result("当前会话已进入睡眠，直接 @ 或唤醒关键词可唤醒。")

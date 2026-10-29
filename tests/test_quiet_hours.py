@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from mingle_tests_plugin.src.scheduler import ChatScheduler
+from mingle_tests_plugin.src.scheduler import ChatScheduler, SessionState
 from mingle_tests_plugin.src.settings import Settings
 from test_scheduler import Event
 
@@ -258,6 +258,7 @@ async def test_quiet_hours_preserve_normal_replies_and_explicit_wakes(clocks, wa
         SimpleNamespace(should_reply=AsyncMock(return_value=True)),
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         if wake:
             scheduler.sleep("group")

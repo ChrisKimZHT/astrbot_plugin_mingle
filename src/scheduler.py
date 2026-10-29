@@ -9,6 +9,7 @@ from time import monotonic
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from astrbot.api.event import AstrMessageEvent
+from astrbot.core.platform.message_type import MessageType
 
 from .decision import ReplyDecision, ReplyJudge
 from .history import ChatHistory
@@ -84,6 +85,7 @@ class SessionState:
     last_agent_finished_at: float = float("-inf")
     last_agent_reply_at: float = field(default_factory=lambda: monotonic())
     last_woken_at: float = float("-inf")
+    sleep_enabled: bool = True
     sleeping: bool = False
     waking: bool = False
     sleep_revision: int = 0
@@ -116,6 +118,41 @@ class ChatScheduler:
         self.closed = False
         self.queue_bubble = queue_bubble
         self.get_config = get_config
+
+    def _get_state(self, key: str) -> SessionState:
+        """Return session state, starting groups asleep and keeping private chats awake.
+
+        Args:
+            key: Full unified session identifier.
+        """
+        state = self.sessions.get(key)
+        if state is not None:
+            return state
+
+        session_parts = key.split(":", 2)
+        is_private = (
+            len(session_parts) == 3
+            and session_parts[1] == MessageType.FRIEND_MESSAGE.value
+        )
+        backlog_interval_seconds = self.settings.sleep_backlog_minutes * 60
+        next_review_at = float("inf")
+        if not is_private and backlog_interval_seconds > 0:
+            next_review_at = monotonic() + backlog_interval_seconds
+        state = SessionState(
+            sleep_enabled=not is_private,
+            sleeping=not is_private,
+            next_sleep_backlog_at=next_review_at,
+        )
+        self.sessions[key] = state
+        return state
+
+    def initialize_session(self, key: str) -> None:
+        """Start a known session's sleep and backlog clocks at plugin startup.
+
+        Args:
+            key: Full unified session identifier from configured sessions.
+        """
+        self._get_state(key)
 
     def _quiet_seconds_remaining(self, key: str) -> float:
         """Return time until quiet hours end in the current session timezone.
@@ -186,7 +223,7 @@ class ChatScheduler:
             return
         if not self.settings.random_bubble_enabled or self.queue_bubble is None:
             return
-        state = self.sessions.setdefault(key, SessionState())
+        state = self._get_state(key)
         if state.bubble_task is not None and not state.bubble_task.done():
             return
         self._reset_bubble_deadline(state)
@@ -365,7 +402,9 @@ class ChatScheduler:
         """
         if self.closed:
             return
-        state = self.sessions.setdefault(key, SessionState())
+        state = self._get_state(key)
+        if not state.sleep_enabled:
+            return
         state.sleeping = True
         state.waking = False
         state.sleep_revision += 1
@@ -399,7 +438,7 @@ class ChatScheduler:
         """
         if self.closed:
             return
-        state = self.sessions.setdefault(key, SessionState())
+        state = self._get_state(key)
         state.last_agent_reply_at = monotonic()
         if state.bubble_task is not None:
             self._reset_bubble_deadline(state)
@@ -427,7 +466,7 @@ class ChatScheduler:
             key: Session whose timeout may have elapsed.
             state: Live session queues and inactivity timestamps.
         """
-        if state.sleeping:
+        if not state.sleep_enabled or state.sleeping:
             return
         timeout_seconds = self.settings.sleep_minutes * 60
         last_activity = max(state.last_agent_reply_at, state.last_woken_at)
@@ -464,7 +503,7 @@ class ChatScheduler:
             ticket.release()
             return ticket
         key = event.unified_msg_origin
-        state = self.sessions.setdefault(key, SessionState())
+        state = self._get_state(key)
         self._check_sleep(key, state)
         if state.sleeping and wake:
             # Invalidate a timed review and return its snapshot to the wake batch.
@@ -706,7 +745,7 @@ class ChatScheduler:
             # No await between inspecting state and clearing the notification:
             # arrivals and Agent transitions cannot be lost in that interval.
             state.changed.clear()
-            if self.settings.sleep_minutes > 0:
+            if state.sleep_enabled and self.settings.sleep_minutes > 0:
                 timeout_seconds = self.settings.sleep_minutes * 60
                 last_activity = max(state.last_agent_reply_at, state.last_woken_at)
                 sleep_at = last_activity + timeout_seconds

@@ -138,6 +138,7 @@ async def test_queued_bubble_yields_to_normal_reply_and_becomes_stale():
         logging.getLogger(),
         queue_bubble=AsyncMock(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         scheduler.watch_random_bubbles("group")
         state = scheduler.sessions["group"]
@@ -225,6 +226,7 @@ async def test_recovery_claims_all_waiting_queues_and_ignores_late_judgment(
         SimpleNamespace(evaluate=evaluate),
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         active = await scheduler.submit(Event(), 1, True)
         assert await asyncio.wait_for(active.ready, 1) == [1]
@@ -267,6 +269,7 @@ async def test_recovery_does_not_claim_messages_after_interruption(flag):
         SimpleNamespace(evaluate=AsyncMock(return_value=ReplyDecision(True))),
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         active = await scheduler.submit(Event(), 1, True)
         await asyncio.wait_for(active.ready, 1)
@@ -288,6 +291,7 @@ async def test_coalesces_messages_preserves_forced_intent_and_waits_for_completi
     scheduler = ChatScheduler(
         Settings(debounce_seconds=0.01), history, judge, logging.getLogger()
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         first = await scheduler.submit(Event(), 1, True)
         second = await scheduler.submit(Event(), 2, False)
@@ -312,6 +316,8 @@ async def test_separate_sessions_are_not_blocked_by_active_turn():
         SimpleNamespace(should_reply=AsyncMock(return_value=True)),
         logging.getLogger(),
     )
+    scheduler.sessions["a"] = SessionState()
+    scheduler.sessions["b"] = SessionState()
     try:
         a = await scheduler.submit(Event("a"), 1, True)
         assert await asyncio.wait_for(a.ready, 1) == [1]
@@ -332,6 +338,7 @@ async def test_zero_cooldown_allows_the_next_group_batch_after_a_reply():
         judge,
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         first = await scheduler.submit(Event(), 1, False)
         assert await asyncio.wait_for(first.ready, 1) == [1]
@@ -352,6 +359,105 @@ def clock(monkeypatch):
         "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
     )
     return clock
+
+
+@pytest.mark.asyncio
+async def test_private_session_never_sleeps_or_judges_idle_messages(clock):
+    key = "p:FriendMessage:alice:device"
+    judge = SimpleNamespace(should_reply=AsyncMock(return_value=False))
+    scheduler = ChatScheduler(
+        Settings(debounce_seconds=0, cooldown_seconds=0),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        judge,
+        logging.getLogger(),
+    )
+    try:
+        scheduler.initialize_session(key)
+        state = scheduler.sessions[key]
+        assert not state.sleep_enabled
+        assert not state.sleeping
+        assert state.next_sleep_backlog_at == float("inf")
+        first = await scheduler.submit(Event(key), 1, True)
+        assert await asyncio.wait_for(first.ready, 1) == [1]
+        first.finished.set()
+        await state.execution_task
+
+        clock.now += 86400
+        scheduler.sleep(key)
+        assert not state.sleeping
+        assert state.sleep_revision == 0
+        second = await scheduler.submit(Event(key), 2, True)
+        assert await asyncio.wait_for(second.ready, 1) == [2]
+        assert not state.sleeping
+        second.finished.set()
+        judge.should_reply.assert_not_awaited()
+    finally:
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sleep_minutes", [0, 5])
+async def test_new_group_starts_asleep_and_explicit_wake_is_judged(sleep_minutes):
+    judge = SimpleNamespace(should_reply=AsyncMock(return_value=True))
+    scheduler = ChatScheduler(
+        Settings(
+            debounce_seconds=0,
+            sleep_minutes=sleep_minutes,
+            sleep_backlog_minutes=0,
+        ),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        judge,
+        logging.getLogger(),
+    )
+    key = "p:GroupMessage:group"
+    try:
+        waiting = await scheduler.submit(Event(key), 1, True)
+        state = scheduler.sessions[key]
+        await asyncio.sleep(0)
+        assert state.sleeping
+        assert state.next_sleep_backlog_at == float("inf")
+        assert not waiting.ready.done()
+        judge.should_reply.assert_not_awaited()
+        wake = await scheduler.submit(Event(key), 2, True, wake=True)
+        assert await asyncio.wait_for(wake.ready, 1) == [1, 2]
+        assert await waiting.ready is None
+        assert not state.sleeping
+        judge.should_reply.assert_awaited_once()
+        assert judge.should_reply.await_args.kwargs["waking"] is True
+        wake.finished.set()
+    finally:
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_group_startup_backlog_clock_survives_first_arrival(clock):
+    judge = SimpleNamespace(should_reply=AsyncMock(return_value=False))
+    scheduler = ChatScheduler(
+        Settings(debounce_seconds=0, sleep_backlog_minutes=1),
+        SimpleNamespace(get=AsyncMock(return_value=[])),
+        judge,
+        logging.getLogger(),
+    )
+    key = "p:GroupMessage:group"
+    try:
+        scheduler.initialize_session(key)
+        state = scheduler.sessions[key]
+        assert state.sleeping
+        assert state.next_sleep_backlog_at == 160
+        assert state.judgment_task is None
+        clock.now = 150
+        ticket = await scheduler.submit(Event(key), 1, False)
+        await asyncio.sleep(0)
+        assert state.next_sleep_backlog_at == 160
+        judge.should_reply.assert_not_awaited()
+        clock.now = 160
+        state.changed.set()
+        assert await asyncio.wait_for(ticket.ready, 1) is None
+        assert state.sleeping
+        assert state.next_sleep_backlog_at == 220
+        assert judge.should_reply.await_args.kwargs["sleep_backlog"] is True
+    finally:
+        await scheduler.close()
 
 
 @pytest.mark.asyncio
@@ -464,6 +570,7 @@ async def test_sleep_backlog_waits_for_active_pipeline(clock):
         judge,
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         active = await scheduler.submit(Event(), 1, True)
         await active.ready
@@ -540,6 +647,7 @@ async def test_sleep_timeout_tracks_agent_reply_not_new_messages(clock, sleep_mi
         judge,
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         first = await scheduler.submit(Event(), 1, False)
         assert await first.ready is None
@@ -621,6 +729,7 @@ async def test_sleep_invalidates_running_judgment_and_approved_work():
         judge,
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         active = await scheduler.submit(Event(), 1, True)
         await active.ready
@@ -683,6 +792,7 @@ async def test_sleep_expiry_holds_approved_work_after_active_pipeline_finishes(c
         judge,
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         active = await scheduler.submit(Event(), 1, True)
         await active.ready
@@ -715,6 +825,8 @@ async def test_auto_sleep_disabled_and_manual_sleep_is_session_local(clock):
         SimpleNamespace(should_reply=AsyncMock(return_value=False)),
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
+    scheduler.sessions["other"] = SessionState()
     try:
         first = await scheduler.submit(Event(), 1, False)
         assert await first.ready is None
@@ -803,6 +915,7 @@ async def test_shutdown_releases_judging_and_pending_handlers():
         SimpleNamespace(should_reply=judge_reply),
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     first = await scheduler.submit(Event(), 1, False)
     await asyncio.wait_for(started.wait(), 1)
     second = await scheduler.submit(Event(), 2, True)
@@ -819,6 +932,7 @@ async def test_stopped_pending_event_is_released():
         SimpleNamespace(should_reply=AsyncMock()),
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         first = await scheduler.submit(Event(), 1, True)
         first.event.stop_event()
@@ -836,6 +950,7 @@ async def test_pending_limit_preserves_direct_address_when_events_are_merged():
         judge,
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         tickets = [
             await scheduler.submit(Event(), number, number == 1)
@@ -863,6 +978,7 @@ async def test_busy_judgment_runs_concurrently_and_exposes_queue_status():
         judge,
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         first = await scheduler.submit(Event(), 1, True)
         assert await asyncio.wait_for(first.ready, 1) == [1]
@@ -898,6 +1014,7 @@ async def test_rerun_requests_stop_but_waits_for_old_history_completion():
         judge,
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         first = await scheduler.submit(Event(), 1, True)
         await asyncio.wait_for(first.ready, 1)
@@ -929,6 +1046,7 @@ async def test_stop_discards_approved_work_without_starting_replacement_turn():
         judge,
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         first = await scheduler.submit(Event(), 1, True)
         await asyncio.wait_for(first.ready, 1)
@@ -969,6 +1087,7 @@ async def test_late_rerun_result_cannot_stop_a_newer_active_turn():
         SimpleNamespace(evaluate=evaluate),
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         first = await scheduler.submit(Event(), 1, True)
         await asyncio.wait_for(first.ready, 1)
@@ -1006,6 +1125,7 @@ async def test_shutdown_cleans_both_execution_and_judgment_tasks():
         SimpleNamespace(evaluate=evaluate),
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     first = await scheduler.submit(Event(), 1, True)
     await asyncio.wait_for(first.ready, 1)
     second = await scheduler.submit(Event(), 2, False)
@@ -1040,6 +1160,7 @@ async def test_busy_judgment_includes_active_messages_outside_recent_window():
         judge,
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         first = await scheduler.submit(Event(), 1, True)
         assert await asyncio.wait_for(first.ready, 1) == [1]
@@ -1219,6 +1340,7 @@ async def test_agent_finishing_during_history_read_defers_batch_until_cooldown(c
         judge,
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         first = await scheduler.submit(Event(), 1, True)
         assert await asyncio.wait_for(first.ready, 1) == [1]
@@ -1282,6 +1404,7 @@ async def test_worker_failure_releases_waiters_and_next_submission_can_restart(
     scheduler = ChatScheduler(
         Settings(debounce_seconds=0), history, judge, logging.getLogger()
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         first = await scheduler.submit(Event(), 1, False)
         second = await scheduler.submit(Event(), 2, False)
@@ -1317,6 +1440,7 @@ async def test_approved_limit_and_stopped_tickets_do_not_block_remaining_work(
         SimpleNamespace(evaluate=AsyncMock(return_value=ReplyDecision(True))),
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         active = await scheduler.submit(Event(), 1, True)
         assert await asyncio.wait_for(active.ready, 1) == [1]
@@ -1374,6 +1498,7 @@ async def test_wait_result_folds_only_current_pending_tail(busy, reply):
         SimpleNamespace(evaluate=evaluate, should_reply=should_reply),
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         active = None
         if busy:
@@ -1431,6 +1556,7 @@ async def test_control_and_forced_negative_results_do_not_fold_pending(decision)
         SimpleNamespace(evaluate=evaluate),
         logging.getLogger(),
     )
+    scheduler.sessions["group"] = SessionState()
     try:
         active = await scheduler.submit(Event(), 1, True)
         assert await asyncio.wait_for(active.ready, 1) == [1]

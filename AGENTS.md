@@ -97,14 +97,17 @@
   Private/explicit wake batches and busy-session judgment bypass cooldown while
   keeping normal merge timing. Agent start/end wake the waiting judgment worker
   so it can recompute eligibility without resetting the merge window.
-- Natural sleep uses scheduler.sleep_minutes (default 5, zero disables automatic
-  sleep) and literal, case-sensitive scheduler.sleep_wake_keywords. Track the last
+- Natural sleep is group-only; new group sessions start asleep. Private sessions
+  never sleep, including startup, inactivity and manual sleep commands.
+  Natural sleep uses scheduler.sleep_minutes (default 5, zero disables inactivity
+  sleep without changing the startup state) and literal, case-sensitive
+  scheduler.sleep_wake_keywords. Track the last
   successful managed current-session native send or Mingle image send through the
   normal tool-result hook; incoming messages and unsent final output do not reset
-  this clock. Startup and waking grant a full timeout window. State is per full
+  this clock. Waking grants a full timeout window. State is per full
   UMO and resets on restart. Sleep retains bounded pending tickets for explicit
   wakes or timed backlog reviews, and never interrupts the active Agent. Direct bot
-  mentions or keywords wake the session; private messages, @all and framework wake
+  mentions or keywords wake the session; @all and framework wake
   prefixes alone do not. The wake batch must be judged, with all retained pending
   records included and only its latest message marked new; the others are history.
   A positive vote admits the complete waiting batch, including records beyond an

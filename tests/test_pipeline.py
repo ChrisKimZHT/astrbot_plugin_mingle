@@ -112,6 +112,7 @@ async def plugin(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_private_and_mentions_bypass_judgment_and_bind_conversation(plugin):
+    plugin.scheduler.sessions[make_event().unified_msg_origin] = SessionState()
     for event in (make_event(private=True), make_event("2")):
         event.is_at_or_wake_command = True
         handler = plugin.on_message(event)
@@ -123,6 +124,29 @@ async def test_private_and_mentions_bypass_judgment_and_bind_conversation(plugin
         assert event.get_extra("mingle_managed") is True
         assert event.get_extra("enable_streaming") is False
         await handler.aclose()
+    plugin.context.llm_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_private_messages_reply_after_startup_and_inactivity(plugin, monkeypatch):
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+    )
+    for number in ("first", "after-idle"):
+        event = make_event(number, private=True)
+        handler = plugin.on_message(event)
+        try:
+            request = await asyncio.wait_for(anext(handler), 1)
+            assert isinstance(request, ProviderRequest)
+            assert number in request.prompt
+            state = plugin.scheduler.sessions[event.unified_msg_origin]
+            assert not state.sleeping
+            assert state.next_sleep_backlog_at == float("inf")
+        finally:
+            await handler.aclose()
+        await state.execution_task
+        clock.now += 86400
     plugin.context.llm_generate.assert_not_awaited()
 
 
@@ -599,10 +623,10 @@ async def test_sleep_backlog_uses_real_history_and_send_hook(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["private", "prefix", "all", "other", "case"])
+@pytest.mark.parametrize("kind", ["prefix", "all", "other", "case"])
 async def test_sleep_only_wakes_for_direct_bot_mention_or_literal_keyword(plugin, kind):
     plugin.settings = replace(plugin.settings, sleep_wake_keywords=("Mingle",))
-    event = make_event(private=kind == "private")
+    event = make_event()
     event.is_at_or_wake_command = True
     if kind == "all":
         event.message_obj.message.append(AtAll())
@@ -660,7 +684,11 @@ async def test_sleep_commands_use_native_admin_filters_and_bypass_storage(
     command_handler = getattr(plugin, name)
     results = [value async for value in command_handler(event)]
     assert "睡眠" in results[0].get_plain_text()
-    assert plugin.scheduler.sessions[event.unified_msg_origin].sleeping
+    if private:
+        assert "私聊不使用睡眠机制" in results[0].get_plain_text()
+        assert event.unified_msg_origin not in plugin.scheduler.sessions
+    else:
+        assert plugin.scheduler.sessions[event.unified_msg_origin].sleeping
     assert await plugin.history.get(event.unified_msg_origin) == []
     plugin.context.llm_generate.assert_not_awaited()
 
@@ -725,6 +753,7 @@ async def test_only_successful_current_session_agent_sends_refresh_sleep_clock(
 
 @pytest.mark.asyncio
 async def test_declined_message_stops_fallback_and_is_still_queryable(plugin):
+    plugin.scheduler.sessions[make_event().unified_msg_origin] = SessionState()
     event = make_event()
     assert [result async for result in plugin.on_message(event)] == []
     assert event.is_stopped()
@@ -1140,6 +1169,7 @@ async def test_protocol_recovery_saves_history_claims_arrivals_and_runs_only_onc
 async def test_protocol_recovery_is_skipped_when_unnecessary_or_unavailable(
     plugin, reason
 ):
+    plugin.scheduler.sessions[make_event().unified_msg_origin] = SessionState()
     from astrbot.core.agent.tool import ToolSet
     from astrbot.core.tools.message_tools import SendMessageToUserTool
 
@@ -1384,6 +1414,7 @@ async def test_barrier_preview_is_bounded_and_session_scoped(plugin):
 
 @pytest.mark.asyncio
 async def test_boundary_filters_agent_prompt_without_filtering_judge_history(plugin):
+    plugin.scheduler.sessions[make_event().unified_msg_origin] = SessionState()
     old = make_event("old")
     old_id = await plugin.history.record(old, old.get_messages())
     await anext(plugin.manage_barrier(old, "set"))
@@ -1561,6 +1592,7 @@ async def test_group_enable_applies_to_isolated_members_and_platform_scope(plugi
     [value async for value in plugin.manage_group(make_event(), "on")]
     isolated = make_event("2")
     isolated.session_id = "bob_group"
+    plugin.scheduler.sessions[isolated.unified_msg_origin] = SessionState()
     assert [value async for value in plugin.on_message(isolated)] == []
     assert isolated.get_extra("mingle_managed")
     # Remove the legacy bare ID so only the newly added platform-scoped rule applies.
@@ -1678,6 +1710,7 @@ async def test_agent_debug_hooks_create_nothing_when_disabled(plugin):
 
 @pytest.mark.asyncio
 async def test_group_off_during_busy_judgment_does_not_stop_active_agent(plugin):
+    plugin.scheduler.sessions[make_event().unified_msg_origin] = SessionState()
     from mingle_tests_plugin.src.decision import ReplyDecision
 
     started, release = asyncio.Event(), asyncio.Event()
