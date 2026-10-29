@@ -676,11 +676,11 @@ def test_management_commands_use_native_group_and_admin_permissions():
         "group",
         "debug",
         "barrier",
+        "whisper",
     }
-    permission = next(
-        item for item in root.event_filters if isinstance(item, PermissionTypeFilter)
+    assert not any(
+        isinstance(item, PermissionTypeFilter) for item in root.event_filters
     )
-    assert permission.permission_type == PermissionType.ADMIN
     event = make_event()
     event.role = "admin"
     event.is_at_or_wake_command = True
@@ -696,6 +696,8 @@ def test_management_commands_use_native_group_and_admin_permissions():
     assert "管理群聊记录边界：set 设置，find 查看，clear 清除" in str(error.value)
     assert root.desc == "管理 Mingle 群聊、调试和记录边界"
     for command in group.sub_command_filters:
+        if command.command_name == "whisper":
+            continue
         handler = command.get_handler_md()
         assert handler.extras_configs.get("sub_command") is True
         descriptor = _build_descriptor(handler)
@@ -1595,3 +1597,48 @@ async def test_edit_tool_switches_and_provider(plugin, monkeypatch, master, indi
     assert "error" in json.loads(await plugin.edit_image(event, "Edit", [1], [0]))
     edit.assert_not_awaited()
     plugin.available = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name,text",
+    [
+        ("whisper", "mingle whisper hello\nworld"),
+        ("whisper_alias", "w hello"),
+        ("whisper", "mingle whisper"),
+        ("whisper_alias", "w"),
+    ],
+)
+@pytest.mark.parametrize("private", [False, True])
+async def test_whisper_discards_entire_message_before_history(
+    plugin, name, text, private
+):
+    from astrbot.core.star.filter.permission import PermissionTypeFilter
+    from astrbot.core.star.star_handler import star_handlers_registry
+
+    metadata = next(
+        item
+        for item in star_handlers_registry.get_handlers_by_module_name(
+            MinglePlugin.__module__
+        )
+        if item.handler_name == name
+    )
+    assert not any(
+        isinstance(item, PermissionTypeFilter) for item in metadata.event_filters
+    )
+    command = next(
+        item for item in metadata.event_filters if isinstance(item, CommandFilter)
+    )
+    event = make_event(private=private)
+    event.message_str = text
+    event.is_at_or_wake_command = True
+    assert command.filter(event, {})
+    event.set_extra("activated_handlers", [metadata])
+    plugin.settings = replace(plugin.settings, group_sessions=(), private_enabled=False)
+    assert [result async for result in plugin.on_message(event)] == []
+    await getattr(plugin, name)(event)
+    assert event.is_stopped()
+    assert event.call_llm
+    assert not plugin.scheduler.sessions
+    assert await plugin.history.get(event.unified_msg_origin) == []
+    plugin.context.llm_generate.assert_not_awaited()

@@ -75,12 +75,20 @@ class MinglePlugin(Star):
             except Exception:
                 self.logger.exception("Mingle retention cleanup failed")
 
-    @filter.command_group("mingle")
-    @filter.permission_type(
-        filter.PermissionType.ADMIN, desc="管理 Mingle 群聊、调试和记录边界"
-    )
+    @filter.command_group("mingle", desc="管理 Mingle 群聊、调试和记录边界")
     def mingle(self):
         """Manage Mingle group access, debugging and history boundaries."""
+
+    @mingle.command("whisper", desc="忽略本条消息，不记录、不回复", priority=maxsize)
+    async def whisper(self, event: AstrMessageEvent) -> None:
+        """Discard this entire message without recording or replying."""
+        event.should_call_llm(True)
+        event.stop_event()
+
+    @filter.command("w", desc="/mingle whisper 的简写", priority=maxsize)
+    async def whisper_alias(self, event: AstrMessageEvent) -> None:
+        """Discard a whisper sent through the short command."""
+        await self.whisper(event)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @mingle.command("barrier", desc="管理群聊记录边界：set 设置，find 查看，clear 清除")
@@ -290,6 +298,15 @@ class MinglePlugin(Star):
             return
         if event.get_self_id() == event.get_sender_id():
             return
+        for handler in event.get_extra("activated_handlers", []):
+            if getattr(
+                handler, "handler_module_path", None
+            ) == self.__module__ and handler.handler_name in {
+                "whisper",
+                "whisper_alias",
+            }:
+                await self.whisper(event)
+                return
         group_session = f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:{event.get_group_id()}"
         if event.is_private_chat():
             if (

@@ -173,8 +173,10 @@
   scheduling them. Recognized commands bypass this gate. Disabling the plugin
   restores native framework behavior.
 - Register `/mingle` through AstrBot's native command_group with group, debug
-  and barrier subcommands. Keep the group and all management handlers
-  administrator-only. Use the framework's command parsing and help rendering;
+  and barrier subcommands. Keep all management handlers administrator-only; the root group is public
+  so all members can use `/mingle whisper`. Register `/w` as its standalone
+  shorthand. Both silently stop the entire event before Mingle storage or
+  scheduling, including empty bodies and attachments, without calling models. Use the framework's command parsing and help rendering;
   do not patch the framework command-group help renderer. Put permission
   decorators above subcommand decorators so native registration creates the
   handler with its sub_command metadata before attaching permissions.
