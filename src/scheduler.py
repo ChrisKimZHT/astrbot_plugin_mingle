@@ -172,9 +172,9 @@ class ChatScheduler:
         """
         if state.sleeping:
             return
-        timeout = self.settings.sleep_seconds
+        timeout_seconds = self.settings.sleep_minutes * 60
         last_activity = max(state.last_agent_reply_at, state.last_woken_at)
-        if timeout > 0 and monotonic() >= last_activity + timeout:
+        if timeout_seconds > 0 and monotonic() >= last_activity + timeout_seconds:
             self.sleep(key)
 
     async def submit(
@@ -428,9 +428,10 @@ class ChatScheduler:
             # No await between inspecting state and clearing the notification:
             # arrivals and Agent transitions cannot be lost in that interval.
             state.changed.clear()
-            if self.settings.sleep_seconds > 0:
+            if self.settings.sleep_minutes > 0:
+                timeout_seconds = self.settings.sleep_minutes * 60
                 last_activity = max(state.last_agent_reply_at, state.last_woken_at)
-                sleep_at = last_activity + self.settings.sleep_seconds
+                sleep_at = last_activity + timeout_seconds
                 remaining_until_sleep = max(0, sleep_at - monotonic())
                 delay = min(delay, remaining_until_sleep)
             try:

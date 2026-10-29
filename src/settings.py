@@ -6,7 +6,7 @@ CONFIG_GROUPS = {
         "debounce_seconds",
         "max_wait_seconds",
         "cooldown_seconds",
-        "sleep_seconds",
+        "sleep_minutes",
         "sleep_backlog_minutes",
         "sleep_wake_keywords",
         "max_pending_messages",
@@ -183,7 +183,7 @@ class Settings:
     debounce_seconds: float = 2.0
     max_wait_seconds: float = 6.0
     cooldown_seconds: float = 3.0
-    sleep_seconds: float = 180.0
+    sleep_minutes: float = 5.0
     sleep_backlog_minutes: float = 30.0
     sleep_wake_keywords: tuple[str, ...] = ()
     initial_context_messages: int = 30
@@ -255,7 +255,7 @@ class Settings:
             "debounce_seconds",
             "max_wait_seconds",
             "cooldown_seconds",
-            "sleep_seconds",
+            "sleep_minutes",
             "sleep_backlog_minutes",
         ):
             value = getattr(settings, name)

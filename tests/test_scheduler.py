@@ -360,10 +360,11 @@ async def test_sleep_backlog_discards_stale_review_on_state_transition(
 
 
 @pytest.mark.asyncio
-async def test_sleep_timeout_tracks_agent_reply_not_new_messages(clock):
+@pytest.mark.parametrize("sleep_minutes", [0.5, 3, 5])
+async def test_sleep_timeout_tracks_agent_reply_not_new_messages(clock, sleep_minutes):
     judge = SimpleNamespace(should_reply=AsyncMock(return_value=False))
     scheduler = ChatScheduler(
-        Settings(debounce_seconds=0, cooldown_seconds=0, sleep_seconds=180),
+        Settings(debounce_seconds=0, cooldown_seconds=0, sleep_minutes=sleep_minutes),
         SimpleNamespace(get=AsyncMock(return_value=[])),
         judge,
         logging.getLogger(),
@@ -373,10 +374,11 @@ async def test_sleep_timeout_tracks_agent_reply_not_new_messages(clock):
         assert await first.ready is None
         clock.now = 200
         scheduler.record_agent_reply("group")
-        clock.now = 379
+        timeout_seconds = sleep_minutes * 60
+        clock.now = 200 + timeout_seconds - 1
         second = await scheduler.submit(Event(), 2, False)
         assert await second.ready is None
-        clock.now = 380
+        clock.now = 200 + timeout_seconds
         third = await scheduler.submit(Event(), 3, False)
         await asyncio.sleep(0)
         state = scheduler.sessions["group"]
@@ -443,7 +445,7 @@ async def test_sleep_invalidates_running_judgment_and_approved_work():
 
     judge = SimpleNamespace(evaluate=evaluate)
     scheduler = ChatScheduler(
-        Settings(debounce_seconds=0, cooldown_seconds=0, sleep_seconds=0),
+        Settings(debounce_seconds=0, cooldown_seconds=0, sleep_minutes=0),
         SimpleNamespace(get=AsyncMock(return_value=[])),
         judge,
         logging.getLogger(),
@@ -480,7 +482,7 @@ async def test_sleep_invalidates_running_judgment_and_approved_work():
 async def test_sleep_can_expire_during_cooldown_without_polling():
     judge = SimpleNamespace(should_reply=AsyncMock(return_value=False))
     scheduler = ChatScheduler(
-        Settings(debounce_seconds=0, cooldown_seconds=10, sleep_seconds=0.02),
+        Settings(debounce_seconds=0, cooldown_seconds=10, sleep_minutes=0.02 / 60),
         SimpleNamespace(get=AsyncMock(return_value=[])),
         judge,
         logging.getLogger(),
@@ -518,7 +520,7 @@ async def test_sleep_expiry_holds_approved_work_after_active_pipeline_finishes(c
         state = scheduler.sessions["group"]
         await state.judgment_task
         assert state.approved == [approved]
-        clock.now = 281
+        clock.now = 401
         active.event.set_extra("mingle_agent_started", True)
         active.finished.set()
         await state.execution_task
@@ -537,7 +539,7 @@ async def test_sleep_expiry_holds_approved_work_after_active_pipeline_finishes(c
 @pytest.mark.asyncio
 async def test_auto_sleep_disabled_and_manual_sleep_is_session_local(clock):
     scheduler = ChatScheduler(
-        Settings(debounce_seconds=0, cooldown_seconds=0, sleep_seconds=0),
+        Settings(debounce_seconds=0, cooldown_seconds=0, sleep_minutes=0),
         SimpleNamespace(get=AsyncMock(return_value=[])),
         SimpleNamespace(should_reply=AsyncMock(return_value=False)),
         logging.getLogger(),

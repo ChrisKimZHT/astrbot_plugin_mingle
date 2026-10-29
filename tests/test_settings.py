@@ -6,9 +6,9 @@ from mingle_tests_plugin.src.settings import Settings
     "config",
     [
         {"scheduler": {"debounce_seconds": -1}},
-        {"scheduler": {"sleep_seconds": -1}},
-        {"scheduler": {"sleep_seconds": float("nan")}},
-        {"scheduler": {"sleep_seconds": True}},
+        {"scheduler": {"sleep_minutes": -1}},
+        {"scheduler": {"sleep_minutes": float("nan")}},
+        {"scheduler": {"sleep_minutes": True}},
         {"scheduler": {"sleep_backlog_minutes": -1}},
         {"scheduler": {"sleep_backlog_minutes": float("nan")}},
         {"scheduler": {"sleep_backlog_minutes": float("inf")}},
@@ -81,7 +81,11 @@ def test_grouped_settings_load_custom_values():
     settings = Settings.from_config(
         {
             "general": {"enabled": False, "private_enabled": False},
-            "scheduler": {"debounce_seconds": 3, "max_wait_seconds": 9},
+            "scheduler": {
+                "debounce_seconds": 3,
+                "max_wait_seconds": 9,
+                "sleep_minutes": 1.5,
+            },
             "judge": {"judge_provider_id": "custom", "judge_prompt_append": "extra"},
             "generator": {
                 "generator_prompt": "base",
@@ -101,6 +105,7 @@ def test_grouped_settings_load_custom_values():
         private_enabled=False,
         debounce_seconds=3,
         max_wait_seconds=9,
+        sleep_minutes=1.5,
         judge_provider_id="custom",
         judge_prompt_append="extra",
         generator_prompt="base",
@@ -117,18 +122,18 @@ def test_grouped_settings_load_custom_values():
 
 
 def test_sleep_settings():
-    assert Settings().sleep_seconds == 180
+    assert Settings().sleep_minutes == 5
     assert Settings().sleep_backlog_minutes == 30
     settings = Settings.from_config(
         {
             "scheduler": {
-                "sleep_seconds": 0,
+                "sleep_minutes": 0,
                 "sleep_backlog_minutes": 0,
                 "sleep_wake_keywords": ["", "Mingle", "名字"],
             }
         }
     )
-    assert settings.sleep_seconds == 0
+    assert settings.sleep_minutes == 0
     assert settings.sleep_backlog_minutes == 0
     assert settings.sleep_wake_keywords == ("Mingle", "名字")
 

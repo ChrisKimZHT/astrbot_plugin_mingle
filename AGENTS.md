@@ -97,7 +97,7 @@
   Private/explicit wake batches and busy-session judgment bypass cooldown while
   keeping normal merge timing. Agent start/end wake the waiting judgment worker
   so it can recompute eligibility without resetting the merge window.
-- Natural sleep uses scheduler.sleep_seconds (default 180, zero disables automatic
+- Natural sleep uses scheduler.sleep_minutes (default 5, zero disables automatic
   sleep) and literal, case-sensitive scheduler.sleep_wake_keywords. Track the last
   successful managed current-session native send or Mingle image send through the
   normal tool-result hook; incoming messages and unsent final output do not reset
