@@ -7,17 +7,18 @@ import pytest
 from mingle_tests_plugin.src.decision import ReplyDecision
 from mingle_tests_plugin.src.scheduler import ChatScheduler, SessionState
 from mingle_tests_plugin.src.settings import Settings
+from scheduler_helpers import wait_for_execution, wait_for_judgment
 
 
 @pytest.mark.asyncio
 async def test_bubble_clock_tracks_actual_sends_not_sleep_or_arrivals(monkeypatch):
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(
-        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+        "mingle_tests_plugin.src.scheduling.timing.monotonic", lambda: clock.now
     )
     sample = AsyncMock()
     draw = Mock(return_value=5400)
-    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.expovariate", draw)
+    monkeypatch.setattr("mingle_tests_plugin.src.scheduling.timing.expovariate", draw)
     scheduler = ChatScheduler(
         Settings(random_bubble_enabled=True, sleep_backlog_minutes=0),
         SimpleNamespace(get=AsyncMock(return_value=[])),
@@ -30,9 +31,9 @@ async def test_bubble_clock_tracks_actual_sends_not_sleep_or_arrivals(monkeypatc
         state = scheduler.sessions["group"]
         assert state.next_bubble_at == 100 + 1800 + 5400
         draw.assert_called_once_with(1 / 5400)
-        first_task = state.bubble_task
+        first_task = state.coordinator_task
         scheduler.watch_random_bubbles("group")
-        assert state.bubble_task is first_task
+        assert state.coordinator_task is first_task
         scheduler.sleep("group")
         ticket = await scheduler.submit(Event(), 1, False)
         assert state.next_bubble_at == 7300
@@ -53,9 +54,11 @@ async def test_bubble_clock_tracks_actual_sends_not_sleep_or_arrivals(monkeypatc
 async def test_bubble_timer_consumes_once_and_reschedules_only_on_send(monkeypatch):
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(
-        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+        "mingle_tests_plugin.src.scheduling.timing.monotonic", lambda: clock.now
     )
-    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.expovariate", lambda _: 10)
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.scheduling.timing.expovariate", lambda _: 10
+    )
     queue = asyncio.Queue()
 
     async def enqueue(key, revision):
@@ -116,7 +119,7 @@ async def test_bubble_claims_sleeping_backlog_and_serializes_followups():
         scheduler.record_agent_reply("group")
         assert not state.sleeping
         following = await scheduler.submit(Event(), 4, False)
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         assert not following.ready.done()
         assert state.active is bubble
         bubble.event.set_extra("mingle_agent_started", True)
@@ -168,14 +171,15 @@ async def test_bubble_default_off_and_group_removal_invalidates_timer():
         scheduler.watch_random_bubbles("group")
         state = scheduler.sessions["group"]
         old_revision = state.bubble_revision
-        old_task = state.bubble_task
+        old_task = state.coordinator_task
         await scheduler.stop_random_bubbles("group")
-        assert old_task.cancelled()
-        assert state.bubble_task is None
+        assert not old_task.done()
+        assert not state.bubbles_enabled
         assert state.next_bubble_at == float("inf")
         assert await scheduler.admit_random_bubble(Event(), old_revision) is None
         scheduler.watch_random_bubbles("group")
-        assert state.bubble_task is not old_task
+        assert state.coordinator_task is old_task
+        assert state.bubbles_enabled
         assert state.next_bubble_at < float("inf")
     finally:
         await scheduler.close()
@@ -232,7 +236,7 @@ async def test_recovery_claims_all_waiting_queues_and_ignores_late_judgment(
         assert await asyncio.wait_for(active.ready, 1) == [1]
         approved = await scheduler.submit(Event(), 2, False)
         state = scheduler.sessions["group"]
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         judging = await scheduler.submit(Event(), 3, False)
         await asyncio.wait_for(started.wait(), 1)
         pending = await scheduler.submit(Event(), 4, False)
@@ -243,7 +247,7 @@ async def test_recovery_claims_all_waiting_queues_and_ignores_late_judgment(
             assert await item.ready is None
         later = await scheduler.submit(Event(), 5, False)
         release.set()
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         assert not active.event.get_extra("agent_stop_requested", False)
         assert state.active_ids == [1, 2, 3, 4]
         assert not state.finished
@@ -356,7 +360,7 @@ async def test_zero_cooldown_allows_the_next_group_batch_after_a_reply():
 def clock(monkeypatch):
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(
-        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+        "mingle_tests_plugin.src.scheduling.timing.monotonic", lambda: clock.now
     )
     return clock
 
@@ -380,7 +384,7 @@ async def test_private_session_never_sleeps_or_judges_idle_messages(clock):
         first = await scheduler.submit(Event(key), 1, True)
         assert await asyncio.wait_for(first.ready, 1) == [1]
         first.finished.set()
-        await state.execution_task
+        await wait_for_execution(state)
 
         clock.now += 86400
         scheduler.sleep(key)
@@ -507,8 +511,8 @@ async def test_sleep_backlog_timer_judges_full_batch_and_wakes_only_on_send(outc
         expected_sleeping = outcome != "sent"
         assert state.sleeping == expected_sleeping
         latest.finished.set()
-        if state.execution_task:
-            await asyncio.wait_for(state.execution_task, 1)
+        if state.active is not None:
+            await wait_for_execution(state)
         assert state.sleeping == expected_sleeping
         earlier_ready = [item.ready for item in tickets[:-1]]
         earlier_results = await asyncio.gather(*earlier_ready)
@@ -543,7 +547,7 @@ async def test_sleep_backlog_interval_does_not_restart_on_arrivals(clock, interv
             judge.should_reply.assert_not_awaited()
             return
         assert await asyncio.wait_for(first.ready, 1) is None
-        await state.judgment_task
+        await wait_for_judgment(state)
         assert state.judgment_task.done()
         assert state.sleeping
         assert state.next_sleep_backlog_at == 3700
@@ -735,7 +739,7 @@ async def test_sleep_invalidates_running_judgment_and_approved_work():
         await active.ready
         approved = await scheduler.submit(Event(), 2, False)
         state = scheduler.sessions["group"]
-        await state.judgment_task
+        await wait_for_judgment(state)
         judging = await scheduler.submit(Event(), 3, False)
         await started.wait()
         scheduler.sleep("group")
@@ -799,12 +803,12 @@ async def test_sleep_expiry_holds_approved_work_after_active_pipeline_finishes(c
         clock.now = 101
         approved = await scheduler.submit(Event(), 2, False)
         state = scheduler.sessions["group"]
-        await state.judgment_task
+        await wait_for_judgment(state)
         assert state.approved == [approved]
         clock.now = 401
         active.event.set_extra("mingle_agent_started", True)
         active.finished.set()
-        await state.execution_task
+        await wait_for_execution(state)
         assert state.sleeping
         assert state.pending == [approved]
         assert state.last_agent_reply_at == 100
@@ -984,7 +988,7 @@ async def test_busy_judgment_runs_concurrently_and_exposes_queue_status():
         assert await asyncio.wait_for(first.ready, 1) == [1]
         second = await scheduler.submit(Event(), 2, False)
         state = scheduler.sessions["group"]
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         assert not second.ready.done()
         assert not first.finished.is_set()
         status = judge.evaluate.call_args.kwargs["message_status"]
@@ -992,7 +996,7 @@ async def test_busy_judgment_runs_concurrently_and_exposes_queue_status():
         assert "active_context" not in judge.evaluate.call_args.kwargs
         assert status["judging"] == [2]
         third = await scheduler.submit(Event(), 3, False)
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         assert judge.evaluate.call_args.kwargs["message_status"]["queued"] == [2]
         first.finished.set()
         assert await asyncio.wait_for(second.ready, 1) is None
@@ -1020,7 +1024,7 @@ async def test_rerun_requests_stop_but_waits_for_old_history_completion():
         await asyncio.wait_for(first.ready, 1)
         second = await scheduler.submit(Event(), 2, False)
         state = scheduler.sessions["group"]
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         assert first.event.get_extra("agent_stop_requested") is True
         assert not first.event.is_stopped()
         assert not second.ready.done()
@@ -1052,14 +1056,14 @@ async def test_stop_discards_approved_work_without_starting_replacement_turn():
         await asyncio.wait_for(first.ready, 1)
         queued = await scheduler.submit(Event(), 2, False)
         state = scheduler.sessions["group"]
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         stop = await scheduler.submit(Event(), 3, True)
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         assert first.event.get_extra("agent_stop_requested") is True
         assert await asyncio.wait_for(queued.ready, 1) is None
         assert await asyncio.wait_for(stop.ready, 1) is None
         first.finished.set()
-        await asyncio.wait_for(state.execution_task, 1)
+        await wait_for_execution(state)
         assert state.active is None
         assert not state.approved
         assert not state.resume_after_rerun
@@ -1093,13 +1097,13 @@ async def test_late_rerun_result_cannot_stop_a_newer_active_turn():
         await asyncio.wait_for(first.ready, 1)
         second = await scheduler.submit(Event(), 2, True)
         state = scheduler.sessions["group"]
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         third = await scheduler.submit(Event(), 3, False)
         await asyncio.wait_for(started.wait(), 1)
         first.finished.set()
         assert await asyncio.wait_for(second.ready, 1) == [2]
         release.set()
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         assert not second.event.get_extra("agent_stop_requested", False)
         assert not third.ready.done()
         second.finished.set()
@@ -1136,7 +1140,7 @@ async def test_shutdown_cleans_both_execution_and_judgment_tasks():
     assert await second.ready is None
     assert await third.ready is None
     assert first.event.is_stopped()
-    assert state.judgment_task.done() and state.execution_task.done()
+    assert state.judgment_task.done() and state.coordinator_task.done()
 
 
 @pytest.mark.asyncio
@@ -1165,7 +1169,7 @@ async def test_busy_judgment_includes_active_messages_outside_recent_window():
         first = await scheduler.submit(Event(), 1, True)
         assert await asyncio.wait_for(first.ready, 1) == [1]
         second = await scheduler.submit(Event(), 2, False)
-        await asyncio.wait_for(scheduler.sessions["group"].judgment_task, 1)
+        await wait_for_judgment(scheduler.sessions["group"])
         assert judge.evaluate.call_args.args[1] == records
         assert judge.evaluate.call_args.kwargs["message_status"]["active"] == [1]
         assert "active_context" not in judge.evaluate.call_args.kwargs
@@ -1308,7 +1312,7 @@ async def test_busy_judgment_bypasses_cooldown(clock):
         first = await scheduler.submit(Event(), 1, True)
         assert await asyncio.wait_for(first.ready, 1) == [1]
         second = await scheduler.submit(Event(), 2, False)
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         judge.evaluate.assert_awaited_once()
         assert not second.ready.done()
         first.finished.set()
@@ -1349,7 +1353,7 @@ async def test_agent_finishing_during_history_read_defers_batch_until_cooldown(c
         await asyncio.wait_for(reading.wait(), 1)
         state = scheduler.sessions["group"]
         first.finished.set()
-        await asyncio.wait_for(state.execution_task, 1)
+        await wait_for_execution(state)
         release.set()
         await asyncio.sleep(0.01)
         assert not second.ready.done()
@@ -1412,7 +1416,7 @@ async def test_worker_failure_releases_waiters_and_next_submission_can_restart(
         pending = await scheduler.submit(Event(), 3, False)
         state = scheduler.sessions["group"]
         release.set()
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         for ticket in (first, second, pending):
             assert await asyncio.wait_for(ticket.ready, 1) is None
         assert not state.judging
@@ -1448,7 +1452,7 @@ async def test_approved_limit_and_stopped_tickets_do_not_block_remaining_work(
         approved = []
         for record_id in (2, 3, 4):
             approved.append(await scheduler.submit(Event(), record_id, False))
-            await asyncio.wait_for(state.judgment_task, 1)
+            await wait_for_judgment(state)
         oldest, stopped, newest = approved
         assert await asyncio.wait_for(oldest.ready, 1) is None
         assert state.finished[2] == "merged"
@@ -1509,7 +1513,7 @@ async def test_wait_result_folds_only_current_pending_tail(busy, reply):
         tail = await scheduler.submit(Event(), 3, False)
         release.set()
         state = scheduler.sessions["group"]
-        await asyncio.wait_for(state.judgment_task, 1)
+        await wait_for_judgment(state)
         if reply:
             assert calls == [[2]]
             if busy:
@@ -1564,7 +1568,7 @@ async def test_control_and_forced_negative_results_do_not_fold_pending(decision)
         await asyncio.wait_for(started.wait(), 1)
         tail = await scheduler.submit(Event(), 3, False)
         release.set()
-        await asyncio.wait_for(scheduler.sessions["group"].judgment_task, 1)
+        await wait_for_judgment(scheduler.sessions["group"])
         assert calls == [[2], [3]]
         assert await asyncio.wait_for(tail.ready, 1) is None
     finally:

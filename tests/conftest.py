@@ -44,4 +44,4 @@ def scheduler_wall_clock(monkeypatch):
         def now(cls, tz=None):
             return datetime(2026, 10, 30, 12, tzinfo=timezone.utc).astimezone(tz)
 
-    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.datetime", Daytime)
+    monkeypatch.setattr("mingle_tests_plugin.src.scheduling.timing.datetime", Daytime)

@@ -10,12 +10,9 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.tool import FunctionTool, ToolSet
-from astrbot.core.cron.events import CronMessageEvent
 from astrbot.core.message.components import At, Plain
-from astrbot.core.platform.astrbot_message import MessageMember
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
-from astrbot.core.platform.platform_metadata import PlatformMetadata
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
@@ -26,6 +23,7 @@ from .src.debug import DebugDumper
 from .src.decision import ReplyJudge
 from .src.history import ChatHistory, boundary_group
 from .src.scheduler import ChatScheduler
+from .src.scheduling.proactive import RandomBubbleEvent
 from .src.settings import Settings
 from .src.tools import history as history_tools
 from .src.tools import images as image_tools
@@ -35,48 +33,6 @@ from .toolbox.calculate import calculate
 from .toolbox.images import edit_image, generate_image
 from .toolbox.random import draw_random
 from .toolbox.time import get_current_time
-
-
-class RandomBubbleEvent(CronMessageEvent):
-    """Route a fresh internal trigger through AstrBot's ordinary pipeline.
-
-    Unlike a replayed incoming event, this owns no user attachments, permissions,
-    or message identity. Sending uses the framework's proactive event support.
-    """
-
-    def __init__(
-        self,
-        context,
-        session: MessageSession,
-        platform_meta: PlatformMetadata,
-        revision: int,
-        self_id: str = "astrbot",
-    ) -> None:
-        """Create an internal trigger without borrowing a member's event.
-
-        Args:
-            context: AstrBot context used for proactive sending.
-            session: Shared group session, never supplied by a model.
-            platform_meta: Current adapter metadata for normal pipeline routing.
-            revision: Sampled clock generation checked again at admission.
-            self_id: Last observed bot identity, or the framework cron default.
-        """
-        super().__init__(
-            context=context,
-            session=session,
-            message="Mingle proactive group-chat turn",
-            sender_id=self_id,
-            message_type=session.message_type,
-            extras={
-                "mingle_bubble_revision": revision,
-                "_api_key_allow_admin_role": False,
-            },
-        )
-        self.platform_meta = platform_meta
-        self.platform = platform_meta
-        self.message_obj.group_id = session.session_id
-        self.message_obj.sender = MessageMember("mingle_scheduler", "Mingle scheduler")
-        self.is_at_or_wake_command = False
 
 
 class MinglePlugin(Star):
@@ -318,22 +274,7 @@ class MinglePlugin(Star):
                     self.scheduler.watch_random_bubbles(group_session)
                 if state == "off":
                     await self.scheduler.stop_random_bubbles(group_session)
-                    for session_state in self.scheduler.sessions.values():
-                        for ticket in (
-                            session_state.pending
-                            + session_state.approved
-                            + session_state.judging
-                        ):
-                            current = ticket.event
-                            current_group = (
-                                f"{current.get_platform_id()}:"
-                                f"{MessageType.GROUP_MESSAGE.value}:{current.get_group_id()}"
-                            )
-                            if (
-                                current_group == group_session
-                                and not ticket.ready.done()
-                            ):
-                                ticket.ready.set_result(None)
+                    self.scheduler.release_group_waiters(group_session)
                 self.logger.info(
                     "Mingle group allowlist updated for %s: %s", group_session, state
                 )

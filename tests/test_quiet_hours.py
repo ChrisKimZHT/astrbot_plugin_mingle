@@ -21,9 +21,9 @@ def clocks(monkeypatch):
         def now(cls, tz=None):
             return clock.wall.astimezone(tz)
 
-    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.datetime", WallClock)
+    monkeypatch.setattr("mingle_tests_plugin.src.scheduling.timing.datetime", WallClock)
     monkeypatch.setattr(
-        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+        "mingle_tests_plugin.src.scheduling.timing.monotonic", lambda: clock.now
     )
     return clock
 
@@ -73,7 +73,7 @@ async def test_due_bubble_resamples_after_quiet_hours_without_a_send(
     clocks, monkeypatch
 ):
     draw = Mock(side_effect=[10, 20])
-    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.expovariate", draw)
+    monkeypatch.setattr("mingle_tests_plugin.src.scheduling.timing.expovariate", draw)
     queue = AsyncMock()
     scheduler = ChatScheduler(
         Settings(random_bubble_enabled=True, random_bubble_min_minutes=0),
@@ -111,7 +111,9 @@ async def test_due_bubble_resamples_after_quiet_hours_without_a_send(
 
 @pytest.mark.asyncio
 async def test_queued_bubble_entering_quiet_hours_is_invalidated(clocks, monkeypatch):
-    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.expovariate", lambda _: 10)
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.scheduling.timing.expovariate", lambda _: 10
+    )
     scheduler = ChatScheduler(
         Settings(random_bubble_enabled=True, random_bubble_min_minutes=0),
         None,
@@ -201,7 +203,7 @@ async def test_backlog_crossing_quiet_start_retains_tickets(clocks, crossing):
             state.approved = [ticket]
             ticket.backlog_sleep_revision = state.sleep_revision
             clocks.wall = clocks.wall.replace(hour=22, minute=0)
-            await scheduler._execute_approved("group", state)
+            scheduler._coordinator("group").admit_approved()
         clocks.now = 1900
         state.changed.set()
         if crossing != "execution":
@@ -237,7 +239,7 @@ async def test_deferred_approved_backlog_preserves_pending_queue_bound(clocks):
         first.backlog_sleep_revision = state.sleep_revision
         second = await scheduler.submit(Event(), 2, False)
         third = await scheduler.submit(Event(), 3, False)
-        await scheduler._execute_approved("group", state)
+        scheduler._coordinator("group").admit_approved()
         assert state.pending == [second, third]
         assert second.forced
         assert await first.ready is None

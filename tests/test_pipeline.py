@@ -27,6 +27,7 @@ from mingle_tests_plugin.src.history import ChatHistory, boundary_group
 from mingle_tests_plugin.src.scheduler import ChatScheduler, SessionState
 from mingle_tests_plugin.src.settings import Settings
 from mingle_tests_plugin.src.utils.history_formatting import format_prompt_history
+from scheduler_helpers import wait_for_execution, wait_for_judgment
 
 
 def make_event(number="1", private=False):
@@ -131,7 +132,7 @@ async def test_private_and_mentions_bypass_judgment_and_bind_conversation(plugin
 async def test_private_messages_reply_after_startup_and_inactivity(plugin, monkeypatch):
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(
-        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+        "mingle_tests_plugin.src.scheduling.timing.monotonic", lambda: clock.now
     )
     for number in ("first", "after-idle"):
         event = make_event(number, private=True)
@@ -145,7 +146,7 @@ async def test_private_messages_reply_after_startup_and_inactivity(plugin, monke
             assert state.next_sleep_backlog_at == float("inf")
         finally:
             await handler.aclose()
-        await state.execution_task
+        await wait_for_execution(state)
         clock.now += 86400
     plugin.context.llm_generate.assert_not_awaited()
 
@@ -156,13 +157,15 @@ async def test_random_bubble_timer_enters_agent_with_reference_backlog(
     plugin, monkeypatch, backlog_count
 ):
     from mcp.types import CallToolResult, TextContent
-    from mingle_tests_plugin.main import RandomBubbleEvent
+    from mingle_tests_plugin.src.scheduling.proactive import RandomBubbleEvent
 
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(
-        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+        "mingle_tests_plugin.src.scheduling.timing.monotonic", lambda: clock.now
     )
-    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.expovariate", lambda _: 5400)
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.scheduling.timing.expovariate", lambda _: 5400
+    )
     plugin.settings = replace(
         plugin.settings,
         random_bubble_enabled=True,
@@ -258,7 +261,7 @@ async def test_random_bubble_uses_configured_prompt_verbatim_only_for_proactive_
     plugin, text
 ):
     from astrbot.core.platform.message_session import MessageSession
-    from mingle_tests_plugin.main import RandomBubbleEvent
+    from mingle_tests_plugin.src.scheduling.proactive import RandomBubbleEvent
 
     plugin.settings = replace(
         plugin.settings, random_bubble_enabled=True, random_bubble_prompt=text
@@ -291,7 +294,7 @@ async def test_random_bubble_uses_configured_prompt_verbatim_only_for_proactive_
 @pytest.mark.asyncio
 async def test_random_bubble_respects_group_boundary_and_stale_trigger(plugin):
     from astrbot.core.platform.message_session import MessageSession
-    from mingle_tests_plugin.main import RandomBubbleEvent
+    from mingle_tests_plugin.src.scheduling.proactive import RandomBubbleEvent
 
     plugin.settings = replace(plugin.settings, random_bubble_enabled=True)
     plugin.scheduler.settings = plugin.settings
@@ -324,7 +327,7 @@ async def test_random_bubble_respects_group_boundary_and_stale_trigger(plugin):
 async def test_random_bubble_pipeline_saves_before_normal_followup(plugin):
     from astrbot.core.platform.message_session import MessageSession
     from mcp.types import CallToolResult, TextContent
-    from mingle_tests_plugin.main import RandomBubbleEvent
+    from mingle_tests_plugin.src.scheduling.proactive import RandomBubbleEvent
 
     plugin.settings = replace(plugin.settings, random_bubble_enabled=True)
     plugin.scheduler.settings = plugin.settings
@@ -408,9 +411,11 @@ async def test_timed_backlog_send_resets_random_bubble_clock(plugin, monkeypatch
 
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(
-        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+        "mingle_tests_plugin.src.scheduling.timing.monotonic", lambda: clock.now
     )
-    monkeypatch.setattr("mingle_tests_plugin.src.scheduler.expovariate", lambda _: 5400)
+    monkeypatch.setattr(
+        "mingle_tests_plugin.src.scheduling.timing.expovariate", lambda _: 5400
+    )
     plugin.settings = replace(plugin.settings, random_bubble_enabled=True)
     plugin.scheduler.settings = plugin.settings
     plugin.scheduler.queue_bubble = AsyncMock()
@@ -536,7 +541,7 @@ async def test_sleep_backlog_uses_real_history_and_send_hook(
 
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(
-        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+        "mingle_tests_plugin.src.scheduling.timing.monotonic", lambda: clock.now
     )
     plugin.settings = replace(
         plugin.settings,
@@ -612,7 +617,7 @@ async def test_sleep_backlog_uses_real_history_and_send_hook(
         expected_sleeping = outcome not in {"sent", "image"}
         assert state.sleeping == expected_sleeping
         await handlers[-1].aclose()
-        await asyncio.wait_for(state.execution_task, 1)
+        await wait_for_execution(state)
         assert state.sleeping == expected_sleeping
     finally:
         for task in tasks:
@@ -701,7 +706,7 @@ async def test_only_successful_current_session_agent_sends_refresh_sleep_clock(
 
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(
-        "mingle_tests_plugin.src.scheduler.monotonic", lambda: clock.now
+        "mingle_tests_plugin.src.scheduling.timing.monotonic", lambda: clock.now
     )
     event = make_event()
     event.set_extra("mingle_turn_id", "turn")
@@ -1126,7 +1131,7 @@ async def test_protocol_recovery_saves_history_claims_arrivals_and_runs_only_onc
             tasks.append(asyncio.create_task(pipeline._process_stages(second)))
             state = plugin.scheduler.sessions[first.unified_msg_origin]
             await asyncio.wait_for(arrival_judged.wait(), 1)
-            await asyncio.wait_for(state.judgment_task, 1)
+            await wait_for_judgment(state)
         release_first.set()
         await asyncio.wait_for(asyncio.gather(*tasks), 2)
         assert len(requests) == 2
@@ -1730,9 +1735,7 @@ async def test_group_off_during_busy_judgment_does_not_stop_active_agent(plugin)
         await asyncio.wait_for(started.wait(), 1)
         [value async for value in plugin.manage_group(make_event("command"), "off")]
         release.set()
-        await asyncio.wait_for(
-            plugin.scheduler.sessions[first.unified_msg_origin].judgment_task, 1
-        )
+        await wait_for_judgment(plugin.scheduler.sessions[first.unified_msg_origin])
         result = await asyncio.gather(second_task, return_exceptions=True)
         assert isinstance(result[0], StopAsyncIteration)
         assert not first.get_extra("agent_stop_requested", False)

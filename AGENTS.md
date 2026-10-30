@@ -82,10 +82,16 @@
 - Keep business modules in the `src/` package. The root `main.py` remains the
   AstrBot entry point and uses relative imports from `.src`. Keep tests in the
   root `tests/` directory and import business modules through the `src` package.
-- `src/scheduler.py` owns separate judgment and execution tasks per unified
-  session. Judgment merges and evaluates new arrivals while one Agent runs;
-  approved batches queue for execution after the active handler fully unwinds.
-  Bound both pending and approved event queues and the merge wait.
+- `src/scheduler.py` is the scheduling entry point; `src/scheduling/` contains
+  session coordination, state, timing, judgment preparation and proactive policy.
+  Each full unified session has one event-driven coordinator loop. History/model
+  IO and event dispatch run as background tasks that return results without
+  changing scheduling state. Atomic entry operations retain synchronous behavior
+  through the same coordinator. Wait for notifications or the nearest useful
+  deadline, never poll. Judgment can evaluate arrivals while one Agent runs;
+  approved batches execute only after its handler fully unwinds. Bound pending
+  and approved queues and the merge wait. Keep group-waiter release inside the
+  scheduler rather than mutating its queues from main.py.
 - Default timing is a three-second proactive cooldown, two-second merge debounce,
   and six-second maximum merge wait. Cooldown starts when an admitted Agent turn
   actually finishes. Preserve ordinary arrivals in the bounded pending queue
