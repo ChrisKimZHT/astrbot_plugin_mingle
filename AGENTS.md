@@ -305,6 +305,27 @@
   history tool and image tool to records after it, including isolated member
   sessions. Clearing restores access to retained records. Do not change AstrBot's
   conversation history or the judgment-model history.
+- `/mingle delete <keyword>` is administrator-only and matches the latest literal
+  case-insensitive substring in the current full UMO, including multiword input
+  through native GreedyStr. Delete only the selected Mingle row and its complete
+  linked Agent requests, including recovery requests and tool calls/results;
+  retain later requests. New managed requests use
+  `mingle:turn:<run_id>:<turn_id>` as the native `llm_checkpoint_id`, reusing
+  the bot source key's per-request turn ID. The run ID links the first request
+  and its optional recovery so either user or bot selection removes both.
+  Do not infer links for legacy or summarized requests. When existing history
+  cannot identify the target safely, reject deletion; an empty conversation or
+  a user row beyond a known snapshot may be deleted without removing a turn.
+  Reserve an idle session through the coordinator and acquire AstrBot's session
+  lock before editing; reject commands during an active managed turn. Keep
+  arrivals pending, block proactive admission, and invalidate stale judgments
+  and release deleted tickets through the coordinator on success. Update native
+  history using ConversationManager; restore it on a Mingle storage failure and
+  explicitly report a failed restore. Preserve the snapshot high-water mark in
+  one leading `mingle:cursor:<record_id>` checkpoint after deletion. The native
+  runner drops this leading metadata when binding history; subsequent real
+  prompts carry the cursor normally. Native reset clears it and rebuilds from
+  retained records. Keep shared cached images under their ordinary retention.
 - Private messages are enabled by default and use the same scheduler. WebChat
   remains on its native flow. When idle and awake, private and explicit wake/mention
   events bypass judgment and cooldown. While busy, evaluate them for control

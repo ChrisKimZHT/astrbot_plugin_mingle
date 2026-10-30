@@ -4,11 +4,165 @@ import json
 import re
 
 from astrbot.api.event import AstrMessageEvent
+from astrbot.core.agent.message import get_checkpoint_id
 from astrbot.core.db.po import Conversation
 
 from .history import ChatHistory, boundary_group
 from .settings import Settings
 from .utils.history_formatting import format_prompt_history
+
+AGENT_BATCH_PATTERN = re.compile(
+    r"(?:^|\n\n)New batch record IDs: (?P<batch_ids>\[(?:\d+(?:, \d+)*)?\])"
+    r"\. Snapshot ends at record (?P<cursor>\d+)\.\n"
+)
+TURN_CHECKPOINT_PREFIX = "mingle:turn:"
+CURSOR_CHECKPOINT_PREFIX = "mingle:cursor:"
+
+
+def agent_history_cursor(messages: list[dict]) -> int:
+    """Read the maximum saved snapshot, including a post-deletion watermark.
+
+    Args:
+        messages: Framework-saved history, without modifying its messages.
+
+    Returns:
+        Latest Mingle snapshot cursor, or zero when no cursor is present.
+    """
+    cursor = 0
+    for message in messages:
+        checkpoint = get_checkpoint_id(message)
+        if checkpoint and checkpoint.startswith(CURSOR_CHECKPOINT_PREFIX):
+            suffix = checkpoint[len(CURSOR_CHECKPOINT_PREFIX) :]
+            if suffix.isdecimal():
+                cursor = max(cursor, int(suffix))
+        if message.get("role") != "user":
+            continue
+        content = message.get("content", "")
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [
+                part.get("text", "") for part in content if part.get("type") == "text"
+            ]
+        else:
+            continue
+        for text in texts:
+            match = AGENT_BATCH_PATTERN.search(text)
+            if match:
+                cursor = max(cursor, int(match["cursor"]))
+    return cursor
+
+
+def remove_message_turns(messages: list[dict], record: dict) -> tuple[list[dict], int]:
+    """Remove complete new checkpoint-linked requests for one stored message.
+
+    Args:
+        messages: Current native conversation history with retained checkpoints.
+        record: Session-authorized Mingle row, including its original source key.
+
+    Returns:
+        Edited history and number of removed requests. Only new Mingle
+        checkpoints with a retained request header are eligible; legacy and
+        summarized history is never guessed. Requests sharing a managed run ID
+        are removed together, including recovery. Inputs are not mutated.
+
+    Raises:
+        ValueError: If a linked request has lost its identifiable input boundary.
+    """
+    turns = []
+    selected_runs = set()
+    segment_start = 0
+    for end, message in enumerate(messages):
+        checkpoint = get_checkpoint_id(message)
+        if not checkpoint:
+            continue
+        if not checkpoint.startswith(TURN_CHECKPOINT_PREFIX):
+            segment_start = end + 1
+            continue
+        run_id, separator, turn_id = checkpoint[
+            len(TURN_CHECKPOINT_PREFIX) :
+        ].partition(":")
+        if not separator or not run_id or not turn_id:
+            segment_start = end + 1
+            continue
+        request_start = None
+        request_match = None
+        request_text = ""
+        for index in range(segment_start, end):
+            candidate = messages[index]
+            if candidate.get("role") != "user":
+                continue
+            content = candidate.get("content")
+            if isinstance(content, str):
+                texts = [content]
+            elif isinstance(content, list):
+                texts = [
+                    part.get("text", "")
+                    for part in content
+                    if part.get("type") == "text"
+                ]
+            else:
+                continue
+            for text in texts:
+                match = AGENT_BATCH_PATTERN.search(text)
+                if match:
+                    request_start = index
+                    request_match = match
+                    request_text = text
+        segment_start = end + 1
+        turns.append((request_start, end + 1, run_id))
+        if request_start is None:
+            continue
+        if record["role"] == "bot":
+            matches = record["source_key"].startswith(f"bot:{turn_id}:sent:")
+        else:
+            batch_ids = json.loads(request_match["batch_ids"])
+            matches = record["id"] in batch_ids
+            if not matches:
+                try:
+                    records, _ = json.JSONDecoder().raw_decode(
+                        request_text[request_match.end() :]
+                    )
+                except ValueError:
+                    records = []
+                if isinstance(records, list):
+                    matches = any(
+                        isinstance(item, dict) and item.get("id") == record["id"]
+                        for item in records
+                    )
+        if matches:
+            selected_runs.add(run_id)
+    ranges = []
+    for start, end, run_id in turns:
+        if run_id not in selected_runs:
+            continue
+        if start is None:
+            raise ValueError("A linked Agent request has no retained input boundary")
+        ranges.append((start, end))
+    if not ranges:
+        return messages, 0
+    edited = []
+    previous_end = 0
+    for start, end in ranges:
+        edited.extend(messages[previous_end:start])
+        previous_end = end
+    edited.extend(messages[previous_end:])
+    # A leading checkpoint is internal metadata: the native runner ignores it
+    # when binding history. The next saved real request carries the cursor again.
+    cursor = agent_history_cursor(messages)
+    while edited:
+        checkpoint = get_checkpoint_id(edited[0])
+        if not checkpoint or not checkpoint.startswith(CURSOR_CHECKPOINT_PREFIX):
+            break
+        edited.pop(0)
+    edited.insert(
+        0,
+        {
+            "role": "_checkpoint",
+            "content": {"id": f"{CURSOR_CHECKPOINT_PREFIX}{cursor}"},
+        },
+    )
+    return edited, len(ranges)
 
 
 async def load_agent_history(
@@ -37,26 +191,7 @@ async def load_agent_history(
     saved = json.loads(conversation.history or "[]")
     if snapshot_end is None:
         snapshot_end = max(batch_ids)
-    cursor = 0
-    for message in saved:
-        if message.get("role") != "user":
-            continue
-        content = message.get("content", "")
-        if isinstance(content, str):
-            texts = [content]
-        elif isinstance(content, list):
-            texts = [
-                part.get("text", "") for part in content if part.get("type") == "text"
-            ]
-        else:
-            texts = []
-        for text in texts:
-            match = re.search(
-                r"(?:^|\n\n)New batch record IDs: \[(?:\d+(?:, \d+)*)?\]\. Snapshot ends at record (\d+)\.\n",
-                text,
-            )
-            if match:
-                cursor = max(cursor, int(match.group(1)))
+    cursor = agent_history_cursor(saved)
     if not saved or (not cursor and not batch_ids):
         initial = await history.get(
             event.unified_msg_origin,

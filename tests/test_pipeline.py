@@ -28,6 +28,7 @@ from mingle_tests_plugin.src.scheduler import ChatScheduler, SessionState
 from mingle_tests_plugin.src.settings import Settings
 from mingle_tests_plugin.src.utils.history_formatting import format_prompt_history
 from scheduler_helpers import wait_for_execution, wait_for_judgment
+from test_generation import make_turn
 
 
 def make_event(number="1", private=False):
@@ -1140,6 +1141,16 @@ async def test_protocol_recovery_saves_history_claims_arrivals_and_runs_only_onc
         await asyncio.wait_for(asyncio.gather(*tasks), 2)
         assert len(requests) == 2
         assert len(set(turn_ids)) == 2
+        checkpoints = [
+            item["content"]["id"]
+            for item in json.loads(conversation.history)
+            if item["role"] == "_checkpoint"
+        ]
+        run_ids = [checkpoint.split(":")[2] for checkpoint in checkpoints]
+        assert len(checkpoints) == 2 and len(set(run_ids)) == 1
+        assert checkpoints == [
+            f"mingle:turn:{run_ids[0]}:{turn_id}" for turn_id in turn_ids
+        ]
         assert saved == ["Unsent final answer", recovery_final]
         assert sender.send_message.await_count == 2
         rows = await plugin.history.get(first.unified_msg_origin)
@@ -1535,6 +1546,311 @@ async def test_barrier_missing_keyword_and_invalid_extra_arguments_preserve_boun
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("private", [False, True])
+async def test_delete_command_removes_latest_match_and_all_linked_turns(
+    plugin, private
+):
+    from astrbot.core.star.star_handler import star_handlers_registry
+
+    event = make_event("delete-command", private=private)
+    first = make_event("first", private=private)
+    first_id = await plugin.history.record(first, [Plain("target phrase")])
+    latest = make_event("latest", private=private)
+    latest_id = await plugin.history.record(latest, [Plain("target phrase")])
+    later = make_event("later", private=private)
+    later_id = await plugin.history.record(later, [Plain("later input")])
+    other = make_event("other", private=not private)
+    other_id = await plugin.history.record(other, [Plain("target phrase")])
+    previous = make_turn("previous", [first_id], first_id)
+    selected = make_turn("selected", [latest_id], latest_id)
+    recovery = make_turn(
+        "recovery",
+        [latest_id],
+        latest_id,
+        prefix="Recovery notice\n\n",
+        run_id="selected",
+    )
+    following = make_turn("following", [later_id], later_id)
+    conversation = plugin.context.conversation_manager.get_conversation.return_value
+    conversation.history = json.dumps(previous + selected + recovery + following)
+
+    async def save(umo, cid, *, history):
+        assert umo == event.unified_msg_origin and cid == "conversation"
+        conversation.history = json.dumps(history)
+
+    plugin.context.conversation_manager.update_conversation = AsyncMock(
+        side_effect=save
+    )
+    handler = next(
+        item
+        for item in star_handlers_registry.get_handlers_by_module_name(
+            MinglePlugin.__module__
+        )
+        if item.handler_name == "delete_message"
+    )
+    command = next(
+        item for item in handler.event_filters if isinstance(item, CommandFilter)
+    )
+    event.role = "admin"
+    event.is_at_or_wake_command = True
+    event.message_str = "mingle delete target phrase"
+    assert command.filter(event, {})
+    assert event.get_extra("parsed_params") == {"keyword": "target phrase"}
+    result = await anext(
+        plugin.delete_message(event, **event.get_extra("parsed_params"))
+    )
+    assert f"消息 ID {latest_id}" in result.get_plain_text()
+    assert "2 轮" in result.get_plain_text()
+    assert result.use_markdown_ is False
+    assert json.loads(conversation.history)[1:] == previous + following
+    assert [
+        row["id"] for row in await plugin.history.get(event.unified_msg_origin)
+    ] == [first_id, later_id]
+    assert (await plugin.history.get(other.unified_msg_origin))[0]["id"] == other_id
+    event.set_extra("activated_handlers", [handler])
+    assert [value async for value in plugin.on_message(event)] == []
+    assert not plugin.scheduler.sessions[event.unified_msg_origin].history_editing
+
+
+@pytest.mark.asyncio
+async def test_delete_bot_reply_removes_its_recovery_and_only_one_database_row(plugin):
+    event = make_event("input")
+    input_id = await plugin.history.record(event, event.get_messages())
+    selected_id = await plugin.history.record(
+        event, [Plain("selected reply")], role="bot", source_key="bot:first:sent:0"
+    )
+    remaining_id = await plugin.history.record(
+        event, [Plain("remaining reply")], role="bot", source_key="bot:recovery:sent:0"
+    )
+    later = make_event("later")
+    later_id = await plugin.history.record(later, later.get_messages())
+    following = make_turn("later", [later_id], later_id)
+    conversation = plugin.context.conversation_manager.get_conversation.return_value
+    conversation.history = json.dumps(
+        make_turn("first", [input_id], input_id, run_id="shared")
+        + make_turn("recovery", [input_id], input_id, run_id="shared")
+        + following
+    )
+
+    async def save(umo, cid, *, history):
+        conversation.history = json.dumps(history)
+
+    plugin.context.conversation_manager.update_conversation = AsyncMock(
+        side_effect=save
+    )
+    result = await anext(plugin.delete_message(event, "selected reply"))
+    assert f"消息 ID {selected_id}" in result.get_plain_text()
+    assert "2 轮" in result.get_plain_text()
+    assert json.loads(conversation.history)[1:] == following
+    assert [
+        row["id"] for row in await plugin.history.get(event.unified_msg_origin)
+    ] == [input_id, remaining_id, later_id]
+
+
+@pytest.mark.asyncio
+async def test_delete_cancellation_restores_native_history_before_resuming(plugin):
+    event = make_event("target")
+    record_id = await plugin.history.record(event, event.get_messages())
+    original = make_turn("target", [record_id], record_id)
+    conversation = plugin.context.conversation_manager.get_conversation.return_value
+    conversation.history = json.dumps(original)
+    started = asyncio.Event()
+    attempts = []
+
+    async def save(umo, cid, *, history):
+        attempts.append(history)
+        conversation.history = json.dumps(history)
+        if len(attempts) == 1:
+            started.set()
+            await asyncio.Event().wait()
+
+    plugin.context.conversation_manager.update_conversation = AsyncMock(
+        side_effect=save
+    )
+    task = asyncio.create_task(anext(plugin.delete_message(event, "message target")))
+    await asyncio.wait_for(started.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(attempts) == 2
+    assert json.loads(conversation.history) == original
+    assert (await plugin.history.get(event.unified_msg_origin))[0]["id"] == record_id
+    assert not plugin.scheduler.sessions[event.unified_msg_origin].history_editing
+
+
+@pytest.mark.asyncio
+async def test_delete_last_turn_preserves_cursor_but_native_reset_rebuilds_context(
+    plugin,
+):
+    event = make_event("first", private=True)
+    first_id = await plugin.history.record(event, [Plain("delete me")])
+    peer = make_event("peer", private=True)
+    peer_id = await plugin.history.record(peer, peer.get_messages())
+    conversation = plugin.context.conversation_manager.get_conversation.return_value
+    conversation.history = json.dumps(make_turn("last", [first_id, peer_id], peer_id))
+
+    async def save(umo, cid, *, history):
+        conversation.history = json.dumps(history)
+
+    plugin.context.conversation_manager.update_conversation = AsyncMock(
+        side_effect=save
+    )
+    result = await anext(plugin.delete_message(event, "delete me"))
+    assert "1 轮" in result.get_plain_text()
+    await plugin.history.close()
+    await plugin.history.initialize()
+    incoming = make_event("incoming", private=True)
+    incoming_id = await plugin.history.record(incoming, incoming.get_messages())
+    records = await plugin._agent_prompt_history(incoming, conversation, [incoming_id])
+    assert [row["id"] for row in records] == [incoming_id]
+    conversation.history = "[]"
+    records = await plugin._agent_prompt_history(incoming, conversation, [incoming_id])
+    assert [row["id"] for row in records] == [peer_id, incoming_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["native", "database", "rollback"])
+async def test_delete_failure_restores_history_and_releases_reservation(
+    plugin, failure
+):
+    event = make_event("target")
+    record_id = await plugin.history.record(event, event.get_messages())
+    original = make_turn("target", [record_id], record_id)
+    conversation = plugin.context.conversation_manager.get_conversation.return_value
+    conversation.history = json.dumps(original)
+    attempts = []
+
+    async def save(umo, cid, *, history):
+        attempts.append(history)
+        if failure == "native" and len(attempts) == 1:
+            raise OSError("native save failed")
+        if failure == "rollback" and len(attempts) == 2:
+            raise OSError("rollback failed")
+        conversation.history = json.dumps(history)
+
+    plugin.context.conversation_manager.update_conversation = AsyncMock(
+        side_effect=save
+    )
+    if failure != "native":
+        plugin.history.delete_record = AsyncMock(side_effect=OSError("delete failed"))
+    result = await anext(plugin.delete_message(event, "message target"))
+    assert "失败" in result.get_plain_text()
+    assert len(attempts) == 2 and attempts[-1] == original
+    if failure == "rollback":
+        assert "恢复失败" in result.get_plain_text()
+    else:
+        assert json.loads(conversation.history) == original
+    assert (await plugin.history.get(event.unified_msg_origin))[0]["id"] == record_id
+    assert not plugin.scheduler.sessions[event.unified_msg_origin].history_editing
+
+
+@pytest.mark.asyncio
+async def test_delete_rejects_busy_empty_missing_and_unidentifiable_turns(plugin):
+    event = make_event("busy", private=True)
+    handler = plugin.on_message(event)
+    await asyncio.wait_for(anext(handler), 1)
+    try:
+        result = await anext(plugin.delete_message(event, "message busy"))
+        assert "正在回复" in result.get_plain_text()
+        assert len(await plugin.history.get(event.unified_msg_origin)) == 1
+    finally:
+        await handler.aclose()
+    await wait_for_execution(plugin.scheduler.sessions[event.unified_msg_origin])
+    assert "用法" in (await anext(plugin.delete_message(event, "  "))).get_plain_text()
+    assert (
+        "未找到匹配"
+        in (await anext(plugin.delete_message(event, "absent"))).get_plain_text()
+    )
+    conversation = plugin.context.conversation_manager.get_conversation.return_value
+    record_id = (await plugin.history.get(event.unified_msg_origin))[0]["id"]
+    conversation.history = json.dumps(make_turn("legacy", [record_id], record_id)[:-1])
+    result = await anext(plugin.delete_message(event, "message busy"))
+    assert "未删除" in result.get_plain_text()
+    assert len(await plugin.history.get(event.unified_msg_origin)) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_waits_for_native_lock_and_preserves_arrivals(plugin):
+    from astrbot.core.utils.session_lock import session_lock_manager
+
+    event = make_event("target")
+    record_id = await plugin.history.record(event, event.get_messages())
+    selected_ticket = await plugin.scheduler.submit(event, record_id, False)
+    async with session_lock_manager.acquire_lock(event.unified_msg_origin):
+        deletion = asyncio.create_task(
+            anext(plugin.delete_message(event, "message target"))
+        )
+        await asyncio.sleep(0)
+        state = plugin.scheduler.sessions[event.unified_msg_origin]
+        assert state.history_editing
+        incoming = make_event("new")
+        incoming_id = await plugin.history.record(incoming, incoming.get_messages())
+        incoming_ticket = await plugin.scheduler.submit(incoming, incoming_id, False)
+        await asyncio.sleep(0)
+        assert not selected_ticket.ready.done()
+        assert not incoming_ticket.ready.done()
+        assert not deletion.done()
+        plugin.context.llm_generate.assert_not_awaited()
+    result = await asyncio.wait_for(deletion, 1)
+    assert "已删除" in result.get_plain_text()
+    assert await selected_ticket.ready is None
+    assert not incoming_ticket.ready.done()
+    assert [ticket.record_id for ticket in state.pending] == [incoming_id]
+    assert not state.history_editing
+
+
+@pytest.mark.asyncio
+async def test_deleting_judging_message_invalidates_its_inflight_vote(plugin):
+    event = make_event("target")
+    plugin.scheduler.sessions[event.unified_msg_origin] = SessionState()
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def decide(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            return LLMResponse(
+                role="assistant", completion_text='{"should_reply": true}'
+            )
+
+    plugin.context.llm_generate.side_effect = decide
+    handler = plugin.on_message(event)
+    incoming_task = asyncio.create_task(anext(handler))
+    await asyncio.wait_for(started.wait(), 1)
+    result = await anext(plugin.delete_message(event, "message target"))
+    assert "已删除" in result.get_plain_text()
+    await asyncio.wait_for(cancelled.wait(), 1)
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(incoming_task, 1)
+    state = plugin.scheduler.sessions[event.unified_msg_origin]
+    assert state.active is None and state.approved == [] and state.judging == []
+    assert await plugin.history.get(event.unified_msg_origin) == []
+
+
+@pytest.mark.asyncio
+async def test_history_edit_blocks_synchronous_proactive_admission(plugin):
+    event = make_event("proactive")
+    plugin.scheduler.settings = replace(plugin.settings, random_bubble_enabled=True)
+    plugin.scheduler.initialize_session(event.unified_msg_origin)
+    state = plugin.scheduler.sessions[event.unified_msg_origin]
+    state.bubbles_enabled = True
+    assert plugin.scheduler.begin_history_edit(event.unified_msg_origin)
+    assert not plugin.scheduler.begin_history_edit(event.unified_msg_origin)
+    task = asyncio.create_task(
+        plugin.scheduler.admit_random_bubble(event, state.bubble_revision)
+    )
+    await asyncio.sleep(0)
+    assert not task.done() and state.active is None
+    plugin.scheduler.end_history_edit(event.unified_msg_origin, None)
+    ticket = await asyncio.wait_for(task, 1)
+    assert ticket is not None and state.active is ticket
+    ticket.finished.set()
+    plugin.scheduler.finish_random_bubble(ticket)
+
+
+@pytest.mark.asyncio
 async def test_group_management_persists_and_updates_all_runtime_settings(plugin):
     event = make_event()
     enabled = [value async for value in plugin.manage_group(event, "on")]
@@ -1698,6 +2014,7 @@ def test_management_commands_use_native_group_and_admin_permissions(role):
         "group",
         "debug",
         "barrier",
+        "delete",
         "whisper",
         "version",
         "sleep",
@@ -1732,7 +2049,7 @@ def test_management_commands_use_native_group_and_admin_permissions(role):
     )
     assert root.desc == "管理 Mingle 群聊、调试和记录边界"
     help_text = str(error.value)
-    admin_commands = {"group", "debug", "barrier"}
+    admin_commands = {"group", "debug", "barrier", "delete"}
     for command in group.sub_command_filters:
         handler = command.get_handler_md()
         assert handler.extras_configs.get("sub_command") is True

@@ -217,6 +217,49 @@ class ChatHistory:
             await self.db.commit()
             return removed
 
+    async def find_message(self, session: str, keyword: str) -> dict | None:
+        """Find the latest retained literal text match in exactly one session.
+
+        Args:
+            session: Full UMO supplied by the administrator event.
+            keyword: Nonempty substring using ordinary history search semantics.
+
+        Returns:
+            Raw stored record including its source key, or None for no match.
+        """
+        async with self.lock:
+            async with self.db.execute(
+                "SELECT * FROM messages WHERE session=? "
+                "AND instr(lower(text), lower(?)) > 0 ORDER BY id DESC LIMIT 1",
+                (session, keyword),
+            ) as cursor:
+                row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def delete_record(self, session: str, record_id: int) -> bool:
+        """Delete one authorized message without resetting IDs or shared images.
+
+        Args:
+            session: Full UMO containing the record.
+            record_id: Mingle database record ID selected in this session.
+
+        Returns:
+            Whether a record was deleted.
+        """
+        async with self.lock:
+            try:
+                cursor = await self.db.execute(
+                    "DELETE FROM messages WHERE session=? AND id=?",
+                    (session, record_id),
+                )
+                removed = cursor.rowcount > 0
+                await cursor.close()
+                await self.db.commit()
+                return removed
+            except BaseException:
+                await self.db.rollback()
+                raise
+
     async def record(
         self,
         event: AstrMessageEvent,

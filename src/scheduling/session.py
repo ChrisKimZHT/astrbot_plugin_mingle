@@ -213,6 +213,47 @@ class SessionCoordinator:
                 ticket.release()
         self.notify()
 
+    def end_history_edit(self, deleted_id: int | None) -> None:
+        """Release a history reservation and discard stale judgment input.
+
+        Args:
+            deleted_id: Deleted record whose waiting ticket must be released,
+                or None when the edit did not change either history.
+        """
+        state = self.state
+        if deleted_id is not None:
+            attempt = self.attempt
+            if attempt is not None:
+                if attempt.waking and not attempt.sleep_backlog:
+                    state.waking = True
+                if state.judgment_task is not None:
+                    task = state.judgment_task
+                    if task.done() and not task.cancelled():
+                        task.exception()
+                    else:
+                        task.cancel()
+                state.judgment_task = None
+                self.attempt = None
+            pending = []
+            for ticket in state.pending + state.judging:
+                if ticket.record_id == deleted_id:
+                    ticket.release()
+                else:
+                    pending.append(ticket)
+            state.pending = sorted(waiting_messages(pending), key=lambda t: t.record_id)
+            state.judging = []
+            approved = []
+            for ticket in state.approved:
+                if ticket.record_id == deleted_id:
+                    ticket.release()
+                else:
+                    approved.append(ticket)
+            state.approved = approved
+            state.finished.pop(deleted_id, None)
+            self.bound_pending(preserve_forced=True)
+        state.history_editing = False
+        self.notify()
+
     def close(self) -> list[asyncio.Task]:
         """Stop admission and return canceled owned tasks for the entry to join."""
         state = self.state
@@ -291,6 +332,9 @@ class SessionCoordinator:
                 active = state.active
                 if active is not None and active.finished.is_set():
                     self.finish_active(active)
+                if state.history_editing:
+                    await state.changed.wait()
+                    continue
                 self.advance_judgment()
                 self.admit_approved()
                 self.proactive.advance()

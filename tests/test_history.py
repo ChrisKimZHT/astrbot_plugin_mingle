@@ -135,6 +135,39 @@ async def test_record_count_retention_and_reply_identity(history):
 
 
 @pytest.mark.asyncio
+async def test_find_and_delete_are_literal_session_scoped_and_keep_shared_images(
+    history, tmp_path
+):
+    image = tmp_path / "delete-source.png"
+    image.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII="
+        )
+    )
+    session = "p:GroupMessage:g"
+    first_id = await history.record(
+        Event("first"), [Plain("Topic 100%_"), Image.fromFileSystem(image)]
+    )
+    latest_id = await history.record(
+        Event("latest"), [Plain("Topic 100%_"), Image.fromFileSystem(image)]
+    )
+    await history.record(Event("other", "other"), [Plain("Topic 100%_")])
+    await history.record(Event("wildcard"), [Plain("Topic 100XX")])
+    record = await history.find_message(session, "topic 100%_")
+    assert record["id"] == latest_id
+    assert record["source_key"] == "user:alice:latest"
+    assert not await history.delete_record("other", latest_id)
+    assert await history.delete_record(session, latest_id)
+    assert not await history.delete_record(session, latest_id)
+    assert (await history.find_message(session, "topic 100%_"))["id"] == first_id
+    assert await history.read_image(session, first_id, 0) is not None
+    assert await history.read_image(session, latest_id, 0) is None
+    await history.close()
+    await history.initialize()
+    assert (await history.find_message(session, "Topic 100%_"))["id"] == first_id
+
+
+@pytest.mark.asyncio
 async def test_image_cache_dedup_expiration_and_cross_session_access(history, tmp_path):
     image = tmp_path / "source.png"
     data = base64.b64decode(

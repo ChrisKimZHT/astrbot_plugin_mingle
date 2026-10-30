@@ -1,16 +1,115 @@
 """Management operations behind the plugin's native command registrations."""
 
+import asyncio
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import replace
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent
+from astrbot.core.conversation_mgr import ConversationManager
+from astrbot.core.utils.session_lock import session_lock_manager
 
+from .generation import agent_history_cursor, remove_message_turns
 from .history import ChatHistory
 from .scheduler import ChatScheduler
 from .settings import Settings
 from .utils.history_formatting import format_prompt_history
+
+
+async def delete_message(
+    event: AstrMessageEvent,
+    keyword: str,
+    *,
+    history: ChatHistory,
+    conversation_manager: ConversationManager,
+    logger: logging.Logger,
+) -> tuple[str, int | None]:
+    """Delete a selected record and complete linked requests under native locking.
+
+    The caller reserves an idle Mingle coordinator until this operation returns.
+    Native history is updated first; a storage failure restores its old value.
+
+    Args:
+        event: Administrator command restricting all access to its full UMO.
+        keyword: Validated nonempty literal substring for latest-match selection.
+        history: Independent Mingle storage.
+        conversation_manager: Native conversation API, never raw framework SQL.
+        logger: Plugin logger for failures without logging message content.
+
+    Returns:
+        User-facing outcome and the deleted record ID, or None on failure.
+    """
+    session = event.unified_msg_origin
+    async with session_lock_manager.acquire_lock(session):
+        try:
+            record = await history.find_message(session, keyword)
+            if record is None:
+                return "当前会话保留的聊天记录中未找到匹配消息。", None
+            conversation_id = await conversation_manager.get_curr_conversation_id(
+                session
+            )
+            conversation = None
+            original = []
+            if conversation_id:
+                conversation = await conversation_manager.get_conversation(
+                    session, conversation_id
+                )
+                if conversation is None:
+                    return "当前 Agent 对话无法读取，未删除消息。", None
+                original = json.loads(conversation.history or "[]")
+            try:
+                edited, count = remove_message_turns(original, record)
+            except ValueError:
+                return "关联的 Agent 轮次已不完整，未删除消息。", None
+            if count == 0 and original:
+                cursor = agent_history_cursor(original)
+                cannot_identify = (
+                    not cursor or record["id"] <= cursor or record["role"] == "bot"
+                )
+                if cannot_identify:
+                    return (
+                        "未找到完整的新 Agent 轮次，记录可能已压缩或属于旧版本，未删除消息。",
+                        None,
+                    )
+            history_attempted = False
+            try:
+                if count:
+                    history_attempted = True
+                    await conversation_manager.update_conversation(
+                        session, conversation_id, history=edited
+                    )
+                removed = await history.delete_record(session, record["id"])
+                if not removed:
+                    raise RuntimeError("The selected message expired before deletion")
+            except (Exception, asyncio.CancelledError) as error:
+                if history_attempted:
+                    try:
+                        await conversation_manager.update_conversation(
+                            session, conversation_id, history=original
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to restore Agent history for %s", session
+                        )
+                        if isinstance(error, asyncio.CancelledError):
+                            raise error
+                        return "删除失败，且 Agent 历史恢复失败，请查看日志。", None
+                raise
+            if count:
+                return (
+                    f"已删除消息 ID {record['id']}，并移除关联的 {count} 轮 Agent 历史"
+                    "（含工具调用）；后续轮次保留。",
+                    record["id"],
+                )
+            return (
+                f"已删除消息 ID {record['id']}；当前 Agent 对话没有可关联的已保存轮次。",
+                record["id"],
+            )
+        except Exception:
+            logger.exception("Failed to delete Mingle message for %s", session)
+            return "删除消息失败，请查看日志。", None
 
 
 async def manage_boundary(

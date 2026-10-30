@@ -169,6 +169,36 @@ class ChatScheduler:
         for coordinator in self._coordinators.values():
             coordinator.release_group_waiters(group_session)
 
+    def begin_history_edit(self, key: str) -> bool:
+        """Reserve an idle session while its persisted histories are edited.
+
+        Args:
+            key: Current full UMO supplied by an administrator command.
+
+        Returns:
+            Whether this caller acquired the session's edit reservation.
+        """
+        if self.closed:
+            return False
+        coordinator = self._coordinator(key)
+        state = coordinator.state
+        if state.active is not None or state.history_editing:
+            return False
+        state.history_editing = True
+        coordinator.notify()
+        return True
+
+    def end_history_edit(self, key: str, deleted_id: int | None) -> None:
+        """Resume coordination and invalidate work that saw a deleted record.
+
+        Args:
+            key: Session whose edit reservation is held by the caller.
+            deleted_id: Successfully deleted record, or None if nothing changed.
+        """
+        coordinator = self._coordinators.get(key)
+        if coordinator is not None:
+            coordinator.end_history_edit(deleted_id)
+
     async def close(self) -> None:
         """Release waiting handlers, cancel owned work, and stop active events."""
         self.closed = True

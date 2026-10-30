@@ -183,6 +183,8 @@ class ProactiveSchedule:
         if self.waiting is None:
             return
         state = self.owner.state
+        if state.history_editing:
+            return
         event, revision, result = self.waiting
         if result.done():
             self.waiting = None

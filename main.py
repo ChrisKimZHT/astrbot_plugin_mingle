@@ -194,6 +194,35 @@ class MinglePlugin(Star):
         yield event.plain_result(message).use_markdown(False)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
+    @mingle.command("delete", desc="🔒 删除最新匹配消息及其 Agent 整轮历史：关键词")
+    async def delete_message(
+        self, event: AstrMessageEvent, keyword: GreedyStr
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """Delete one session-scoped record and its checkpoint-linked Agent turns."""
+        keyword = keyword.strip()
+        if not keyword:
+            yield event.plain_result("用法：/mingle delete <关键词>")
+            return
+        if not self.available:
+            yield event.plain_result("Mingle 存储尚未就绪。")
+            return
+        if not self.scheduler.begin_history_edit(event.unified_msg_origin):
+            yield event.plain_result("当前会话正在回复或管理历史，请稍后重试。")
+            return
+        deleted_id = None
+        try:
+            message, deleted_id = await management.delete_message(
+                event,
+                keyword,
+                history=self.history,
+                conversation_manager=self.context.conversation_manager,
+                logger=self.logger,
+            )
+        finally:
+            self.scheduler.end_history_edit(event.unified_msg_origin, deleted_id)
+        yield event.plain_result(message).use_markdown(False)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @mingle.command("group", desc="🔒 开启或关闭当前群聊：on|off")
     async def manage_group(
         self, event: AstrMessageEvent, state: str
@@ -459,6 +488,7 @@ class MinglePlugin(Star):
             # ============================================================
             # Run normally first, then allow at most one recovery after history
             # saving. A valid completion or unavailable recovery exits early.
+            run_id = uuid.uuid4().hex
             for attempt in range(2):
                 is_recovery = attempt == 1
                 if not self.available or not self.settings.enabled:
@@ -538,7 +568,9 @@ class MinglePlugin(Star):
                 # ============================================================
                 if event.is_stopped() or event.get_extra("agent_stop_requested", False):
                     return
-                event.set_extra("mingle_turn_id", uuid.uuid4().hex)
+                turn_id = uuid.uuid4().hex
+                event.set_extra("mingle_turn_id", turn_id)
+                event.set_extra("llm_checkpoint_id", f"mingle:turn:{run_id}:{turn_id}")
                 event.set_extra("mingle_agent_started", True)
                 event.set_extra("mingle_recovery_needed", False)
                 event.set_extra("mingle_send_tool_available", False)

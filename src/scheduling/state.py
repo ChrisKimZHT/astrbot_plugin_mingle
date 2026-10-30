@@ -96,3 +96,4 @@ class SessionState:
     next_bubble_at: float = float("inf")
     bubble_revision: int = 0
     resume_after_rerun: bool = False
+    history_editing: bool = False
