@@ -143,6 +143,14 @@
   a successful managed current-session send. A fresh sleep or explicit wake
   invalidates stale reviews; manual sleep during an active backlog turn prevents
   that turn's later sends from waking it again.
+- Persist only waiting sleeping backlog in Mingle SQLite, including real group
+  routing and arrival times. Restore it with fresh member-level internal events
+  in the original full UMO; never replay raw incoming events or restore active
+  Agent runs. Real arrivals, timed backlog reviews and random bubbles can claim
+  restored input through the existing coordinator. Remove persisted tickets on
+  decline or admission, and flush removals before starting an Agent. Message
+  deletion and retention also remove linked backlog entries. Sleep and proactive
+  clocks still reset on restart; this is not general queue or send persistence.
 - `src/decision.py` calls a judgment provider without tools. An empty provider ID
   follows AstrBot's current session provider; another configured provider may be
   selected in the plugin settings. Invalid decisions and failures mean silence.

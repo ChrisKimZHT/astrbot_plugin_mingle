@@ -86,6 +86,7 @@ class ChatHistory:
         await self.db.executescript("""
             PRAGMA journal_mode=WAL;
             PRAGMA busy_timeout=5000;
+            PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session TEXT NOT NULL,
@@ -112,9 +113,49 @@ class ChatHistory:
                 record_id INTEGER NOT NULL,
                 set_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sleep_backlog (
+                record_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+                session TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                self_id TEXT NOT NULL,
+                received_at REAL NOT NULL
+            );
             PRAGMA user_version=1;
         """)
         await self.db.commit()
+
+    async def save_sleep_backlog(self, session: str, records: list[tuple]) -> None:
+        """Replace one session's bounded sleeping queue without copying message bodies.
+
+        Args:
+            session: Full UMO owning the queue.
+            records: Tuples of record ID, actual group ID, bot ID and Unix arrival time.
+        """
+        async with self.lock:
+            try:
+                await self.db.execute(
+                    "DELETE FROM sleep_backlog WHERE session=?", (session,)
+                )
+                for record_id, group_id, self_id, received_at in records:
+                    await self.db.execute(
+                        "INSERT INTO sleep_backlog "
+                        "SELECT id, session, ?, ?, ? FROM messages "
+                        "WHERE id=? AND session=? AND role='user'",
+                        (group_id, self_id, received_at, record_id, session),
+                    )
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
+
+    async def get_sleep_backlog(self) -> list[dict]:
+        """Read retained sleeping tickets in session and record order."""
+        async with self.lock:
+            async with self.db.execute(
+                "SELECT * FROM sleep_backlog ORDER BY session, record_id"
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
     async def set_boundary(
         self, group: str, *, session: str = "", keyword: str = ""

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 
 from astrbot.api.event import AstrMessageEvent
@@ -28,6 +29,7 @@ class ChatScheduler:
         logger: logging.Logger,
         queue_bubble: Callable[[str, int], Awaitable[None]] | None = None,
         get_config: Callable[..., dict] | None = None,
+        save_sleep_backlog: Callable[[str, list[tuple]], Awaitable[None]] | None = None,
     ) -> None:
         self.settings = settings
         self.history = history
@@ -38,6 +40,112 @@ class ChatScheduler:
         self.queue_bubble = queue_bubble
         self.get_config = get_config
         self._coordinators: dict[str, SessionCoordinator] = {}
+        self._save_sleep_backlog = save_sleep_backlog
+        self._backlog_snapshots: dict[str, list[tuple]] = {}
+        self._backlog_updates: dict[str, list[tuple]] = {}
+        self._backlog_write_task: asyncio.Task | None = None
+        self._backlog_write_errors: dict[str, Exception] = {}
+
+    def persist_sleep_backlog(self, key: str) -> None:
+        """Capture sleeping tickets and serialize coalesced writes off the coordinator.
+
+        Args:
+            key: Full UMO whose synchronous scheduling transition has completed.
+        """
+        if self._save_sleep_backlog is None:
+            return
+        state = self.sessions[key]
+        previous = self._backlog_snapshots.get(key, [])
+        retained_ids = {row[0] for row in previous}
+        records = []
+        offset = time.time() - timing.monotonic()
+        for item in state.pending + state.judging + state.approved:
+            if not state.sleeping and item.record_id not in retained_ids:
+                continue
+            if (
+                item.ready.done()
+                or item.event.is_stopped()
+                or item.event.get_extra("agent_stop_requested", False)
+            ):
+                continue
+            records.append(
+                (
+                    item.record_id,
+                    item.event.get_group_id(),
+                    item.event.get_self_id(),
+                    item.received_at + offset,
+                )
+            )
+        records.sort()
+        # Compare IDs and routing only: converting clock domains can introduce jitter.
+        unchanged = [row[:3] for row in records] == [row[:3] for row in previous]
+        if unchanged and key not in self._backlog_write_errors:
+            return
+        self._backlog_snapshots[key] = records
+        self._backlog_updates[key] = records
+        if self._backlog_write_task is None or self._backlog_write_task.done():
+            self._backlog_write_task = asyncio.create_task(self._write_sleep_backlogs())
+
+    async def _write_sleep_backlogs(self) -> None:
+        """Write captured snapshots in order without changing scheduling state."""
+        while self._backlog_updates:
+            key = next(iter(self._backlog_updates))
+            records = self._backlog_updates.pop(key)
+            try:
+                await self._save_sleep_backlog(key, records)
+                self._backlog_write_errors.pop(key, None)
+            except Exception as error:
+                self._backlog_write_errors[key] = error
+                self.logger.exception("Failed to persist sleeping backlog for %s", key)
+
+    async def flush_sleep_backlog(self, key: str | None = None) -> None:
+        """Finish writes, including admission outside the coordinator's loop.
+
+        Args:
+            key: Admitted session to capture before waiting for writes, if any.
+        """
+        if key is not None:
+            self.persist_sleep_backlog(key)
+        if self._backlog_write_task is not None:
+            await asyncio.shield(self._backlog_write_task)
+        if key is not None and key in self._backlog_write_errors:
+            raise RuntimeError(
+                "Sleeping backlog persistence failed"
+            ) from self._backlog_write_errors[key]
+        if key is None and self._backlog_write_errors:
+            error = next(iter(self._backlog_write_errors.values()))
+            raise RuntimeError("Sleeping backlog persistence failed") from error
+
+    def restore_sleep_backlog(
+        self, event: AstrMessageEvent, records: list[dict]
+    ) -> PendingMessage:
+        """Rebuild sleeping tickets using one fresh internal pipeline event.
+
+        Args:
+            event: Neutral internal event retaining the original full UMO and group.
+            records: Nonempty retained sleeping rows in ascending record order.
+
+        Returns:
+            Latest ticket whose handler can execute an admitted restored batch.
+        """
+        coordinator = self._coordinator(event.unified_msg_origin)
+        self._backlog_snapshots[event.unified_msg_origin] = [
+            (
+                row["record_id"],
+                row["group_id"],
+                row["self_id"],
+                row["received_at"],
+            )
+            for row in records
+        ]
+        now = timing.monotonic()
+        wall_now = time.time()
+        for record in records:
+            received_at = now - max(0.0, wall_now - record["received_at"])
+            ticket = coordinator.submit(
+                event, record["record_id"], False, False, received_at=received_at
+            )
+        return ticket
 
     def _coordinator(self, key: str) -> SessionCoordinator:
         """Resolve state, starting groups asleep and keeping private chats awake.
@@ -203,8 +311,11 @@ class ChatScheduler:
         """Release waiting handlers, cancel owned work, and stop active events."""
         self.closed = True
         tasks = []
-        for coordinator in self._coordinators.values():
+        for key, coordinator in self._coordinators.items():
+            self.persist_sleep_backlog(key)
             tasks.extend(coordinator.close())
         await asyncio.gather(*tasks, return_exceptions=True)
+        if self._backlog_write_task is not None:
+            await asyncio.shield(self._backlog_write_task)
         self._coordinators.clear()
         self.sessions.clear()

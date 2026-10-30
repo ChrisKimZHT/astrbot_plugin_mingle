@@ -46,7 +46,13 @@ class SessionCoordinator:
             self.state.coordinator_task = asyncio.create_task(self.run())
 
     def submit(
-        self, event: AstrMessageEvent, record_id: int, forced: bool, wake: bool
+        self,
+        event: AstrMessageEvent,
+        record_id: int,
+        forced: bool,
+        wake: bool,
+        *,
+        received_at: float | None = None,
     ) -> PendingMessage:
         """Retain an arrival and preserve wake intent through bounded merging.
 
@@ -55,6 +61,7 @@ class SessionCoordinator:
             record_id: Persisted Mingle database record ID.
             forced: Private or directly addressed input bypassing idle judgment.
             wake: Direct mention or literal keyword that wakes a sleeping group.
+            received_at: Restored monotonic arrival time, or None for a new arrival.
         """
         state = self.state
         ticket = PendingMessage(
@@ -62,7 +69,7 @@ class SessionCoordinator:
             record_id,
             forced,
             asyncio.get_running_loop().create_future(),
-            timing.monotonic(),
+            timing.monotonic() if received_at is None else received_at,
             finished=CompletionSignal(state.changed),
         )
         if self.scheduler.closed:
@@ -82,6 +89,7 @@ class SessionCoordinator:
             self.scheduler.logger.info("Mingle session woke from sleep: %s", self.key)
         state.pending.append(ticket)
         self.bound_pending(preserve_forced=True)
+        self.scheduler.persist_sleep_backlog(self.key)
         self.scheduler.logger.info(
             "Mingle queue for session %s: pending=%d, judging=%d, approved=%d, active=%d",
             self.key,
@@ -109,6 +117,7 @@ class SessionCoordinator:
         state.approved = []
         self.bound_pending(preserve_forced=False)
         state.resume_after_rerun = False
+        self.scheduler.persist_sleep_backlog(self.key)
         self.notify()
         self.scheduler.logger.info("Mingle session entered sleep: %s", self.key)
 
@@ -340,6 +349,7 @@ class SessionCoordinator:
                 self.proactive.advance()
                 self.start_due_judgment()
                 self.proactive.admit()
+                self.scheduler.persist_sleep_backlog(self.key)
                 deadline = self.next_deadline()
                 if deadline == float("inf"):
                     await state.changed.wait()

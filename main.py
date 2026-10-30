@@ -50,6 +50,7 @@ class MinglePlugin(Star):
             self.logger,
             queue_bubble=self._queue_random_bubble,
             get_config=self.context.get_config,
+            save_sleep_backlog=self.history.save_sleep_backlog,
         )
         self.bubble_self_ids: dict[str, str] = {}
         self.cleanup_task: asyncio.Task | None = None
@@ -66,6 +67,7 @@ class MinglePlugin(Star):
             raise
         self.available = True
         self.cleanup_task = asyncio.create_task(self._cleanup_loop())
+        await self._restore_sleep_backlog()
         for key in self.settings.group_sessions:
             try:
                 session = MessageSession.from_str(key)
@@ -79,6 +81,43 @@ class MinglePlugin(Star):
             "Mingle initialized with %d configured group sessions",
             len(self.settings.group_sessions),
         )
+
+    async def _restore_sleep_backlog(self) -> None:
+        """Attach retained sleeping input to fresh internal events, preserving full UMOs."""
+        if not self.settings.enabled:
+            return
+        sessions = {}
+        for record in await self.history.get_sleep_backlog():
+            sessions.setdefault(record["session"], []).append(record)
+        for key, records in sessions.items():
+            session = MessageSession.from_str(key)
+            latest = records[-1]
+            group_id = latest["group_id"]
+            group_umo = (
+                f"{session.platform_id}:{MessageType.GROUP_MESSAGE.value}:{group_id}"
+            )
+            if not {key, group_umo, group_id}.intersection(
+                self.settings.group_sessions
+            ):
+                continue
+            platform = self.context.get_platform_inst(session.platform_id)
+            if platform is None or platform.meta().name == "webchat":
+                continue
+            config = self.context.get_config(umo=key)
+            if not config.get("provider_settings", {}).get("enable", True):
+                continue
+            if config.get("agent_runner", {}).get("runner_type", "local") != "local":
+                continue
+            event = RandomBubbleEvent(
+                self.context, session, platform.meta(), 0, latest["self_id"]
+            )
+            event.message_obj.group_id = group_id
+            ticket = self.scheduler.restore_sleep_backlog(event, records)
+            event.set_extra("mingle_backlog_ticket", ticket)
+            if not config.get("platform_settings", {}).get("unique_session", False):
+                self.bubble_self_ids[key] = latest["self_id"]
+                self.scheduler.watch_random_bubbles(key)
+            await self.context.get_event_queue().put(event)
 
     async def _queue_random_bubble(self, key: str, revision: int) -> None:
         """Submit a fresh internal event using the current platform and profile.
@@ -325,12 +364,16 @@ class MinglePlugin(Star):
         # ============================================================
         # 1. Check event eligibility
         # ============================================================
-        is_bubble = isinstance(event, RandomBubbleEvent)
-        if is_bubble:
+        is_internal = isinstance(event, RandomBubbleEvent)
+        backlog_ticket = (
+            event.get_extra("mingle_backlog_ticket") if is_internal else None
+        )
+        is_bubble = is_internal and backlog_ticket is None
+        if is_internal:
             # Internal triggers must never fall through to ordinary handlers.
             event.should_call_llm(True)
         if not self.available or not self.settings.enabled:
-            if is_bubble:
+            if is_internal:
                 event.stop_event()
             return
         if event.get_self_id() == event.get_sender_id():
@@ -340,7 +383,7 @@ class MinglePlugin(Star):
         # 2. Preserve commands and validate session access
         # ============================================================
         activated_handlers = []
-        if not is_bubble:
+        if not is_internal:
             activated_handlers = event.get_extra("activated_handlers", [])
         for handler in activated_handlers:
             is_whisper_handler = getattr(
@@ -381,7 +424,7 @@ class MinglePlugin(Star):
             return
         config = self.context.get_config(umo=event.unified_msg_origin)
         if not config.get("provider_settings", {}).get("enable", True):
-            if is_bubble:
+            if is_internal:
                 event.stop_event()
             return
         if config.get("agent_runner", {}).get("runner_type", "local") != "local":
@@ -389,7 +432,7 @@ class MinglePlugin(Star):
                 "Mingle requires the local Agent runner for session %s",
                 event.unified_msg_origin,
             )
-            if is_bubble:
+            if is_internal:
                 event.stop_event()
             return
 
@@ -403,7 +446,7 @@ class MinglePlugin(Star):
         # This flag disables the default fallback, not explicit ProviderRequests.
         event.should_call_llm(True)
         try:
-            if is_bubble:
+            if is_internal:
                 record_id = None
             else:
                 record_id = await self.history.record(event, event.get_messages())
@@ -416,7 +459,10 @@ class MinglePlugin(Star):
             # 4. Submit input and wait for batch admission
             # ============================================================
             snapshot_end = None
-            if is_bubble:
+            if backlog_ticket is not None:
+                ticket = backlog_ticket
+                batch_ids = await ticket.ready
+            elif is_bubble:
                 if config.get("platform_settings", {}).get("unique_session", False):
                     return
                 tail = await self.history.get(
@@ -474,6 +520,7 @@ class MinglePlugin(Star):
                 event.get_group_id(),
             }.intersection(self.settings.group_sessions):
                 return
+            await self.scheduler.flush_sleep_backlog(event.unified_msg_origin)
             conversation_manager = self.context.conversation_manager
             conversation_id = await conversation_manager.get_curr_conversation_id(
                 event.unified_msg_origin

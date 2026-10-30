@@ -103,6 +103,7 @@ async def plugin(tmp_path, monkeypatch):
             instance.context, instance.settings, instance.logger, instance.debug_dumper
         ),
         instance.logger,
+        save_sleep_backlog=instance.history.save_sleep_backlog,
     )
     instance.available = True
     instance.cleanup_task = None
