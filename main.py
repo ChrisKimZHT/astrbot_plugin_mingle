@@ -1,6 +1,5 @@
 import asyncio
 import json
-import re
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import replace
@@ -19,6 +18,7 @@ from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 from mcp.types import CallToolResult
 
+from .src import generation, management
 from .src.debug import DebugDumper
 from .src.decision import ReplyJudge
 from .src.history import ChatHistory, boundary_group
@@ -27,7 +27,6 @@ from .src.scheduling.proactive import RandomBubbleEvent
 from .src.settings import Settings
 from .src.tools import history as history_tools
 from .src.tools import images as image_tools
-from .src.utils.history_formatting import format_prompt_history
 from .src.utils.version import VERSION
 from .toolbox.calculate import calculate
 from .toolbox.images import edit_image, generate_image
@@ -180,40 +179,14 @@ class MinglePlugin(Star):
         if not self.available:
             yield event.plain_result("Mingle 存储尚未就绪。")
             return
-        try:
-            if action == "set":
-                record_id, set_at = await self.history.set_boundary(group)
-                message = f"已设置群聊记录边界：记录 ID {record_id} 之后的消息可见。"
-            elif action == "clear":
-                removed = await self.history.clear_boundary(group)
-                message = (
-                    "已清除群聊记录边界。" if removed else "当前群聊未设置记录边界。"
-                )
-            else:
-                preview = await self.history.boundary_preview(
-                    group, event.unified_msg_origin
-                )
-                if preview is None:
-                    message = "当前群聊未设置记录边界。"
-                else:
-                    timezone_name = self.context.get_config(
-                        umo=event.unified_msg_origin
-                    ).get("timezone")
-                    lines = []
-                    for record in preview:
-                        if record is None:
-                            lines.append("（暂无保留的消息）")
-                            continue
-                        formatted_records = format_prompt_history(
-                            [record], timezone_name
-                        )
-                        formatted = formatted_records[0]
-                        timestamp = formatted["timestamp"] or "未知时间"
-                        lines.append(f"[{timestamp}] {formatted['text']}")
-                    message = f"{lines[0]}\n\n--- barrier ---\n\n{lines[1]}"
-        except Exception:
-            self.logger.exception("Failed to manage history boundary for %s", group)
-            message = "操作群聊记录边界失败，请查看日志。"
+        message = await management.manage_boundary(
+            event,
+            action,
+            group,
+            history=self.history,
+            get_config=self.context.get_config,
+            logger=self.logger,
+        )
         yield event.plain_result(message).use_markdown(False)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -241,50 +214,17 @@ class MinglePlugin(Star):
             f"{event.get_group_id()}"
         )
         async with self.config_lock:
-            previous = dict(self.config["general"])
-            sessions = list(previous.get("group_sessions", []))
-            if state == "on":
-                if group_session not in sessions:
-                    sessions.append(group_session)
-            else:
-                matching = {
-                    group_session,
-                    event.unified_msg_origin,
-                    event.get_group_id(),
-                }
-                sessions = [item for item in sessions if item.strip() not in matching]
-            try:
-                await self.config.save_config_async(
-                    {"general": {**previous, "group_sessions": sessions}}
-                )
-            except Exception:
-                self.config["general"] = previous
-                self.logger.exception(
-                    "Failed to update Mingle group allowlist for %s", group_session
-                )
-                message = "保存配置失败，当前群聊的 Mingle 设置未更改。"
-            else:
-                self.settings = replace(self.settings, group_sessions=tuple(sessions))
-                self.scheduler.settings = self.settings
-                self.scheduler.judge.settings = self.settings
-                self.history.settings = self.settings
-                self.debug_dumper.settings = self.settings
-                if state == "on":
-                    self.bubble_self_ids[group_session] = event.get_self_id()
-                    self.scheduler.watch_random_bubbles(group_session)
-                if state == "off":
-                    await self.scheduler.stop_random_bubbles(group_session)
-                    self.scheduler.release_group_waiters(group_session)
-                self.logger.info(
-                    "Mingle group allowlist updated for %s: %s", group_session, state
-                )
-                message = (
-                    "已启用当前群聊的 Mingle。"
-                    if state == "on"
-                    else "已关闭当前群聊的 Mingle。"
-                )
-                if state == "on" and not self.settings.enabled:
-                    message += "插件总开关当前关闭，需在配置中启用。"
+            message = await management.update_group(
+                event,
+                state,
+                group_session,
+                config=self.config,
+                settings=self.settings,
+                apply_settings=self._apply_settings,
+                scheduler=self.scheduler,
+                bubble_self_ids=self.bubble_self_ids,
+                logger=self.logger,
+            )
         yield event.plain_result(message)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -311,46 +251,28 @@ class MinglePlugin(Star):
                 f"{event.get_group_id()}"
             )
         async with self.config_lock:
-            previous = dict(self.config["debug"])
-            sessions = [
-                item.strip()
-                for item in previous.get("debug_sessions", [])
-                if item.strip()
-            ]
-            if state == "on":
-                if session not in sessions:
-                    sessions.append(session)
-            else:
-                sessions = [
-                    item
-                    for item in sessions
-                    if item not in {session, event.unified_msg_origin}
-                ]
-            try:
-                await self.config.save_config_async(
-                    {"debug": {**previous, "debug_sessions": sessions}}
-                )
-            except Exception:
-                self.config["debug"] = previous
-                self.logger.exception(
-                    "Failed to update Mingle debug sessions for %s", session
-                )
-                message = "保存配置失败，当前会话的 debug 设置未更改。"
-            else:
-                self.settings = replace(self.settings, debug_sessions=tuple(sessions))
-                self.scheduler.settings = self.settings
-                self.scheduler.judge.settings = self.settings
-                self.history.settings = self.settings
-                self.debug_dumper.settings = self.settings
-                self.logger.info(
-                    "Mingle debug setting updated for %s: %s", session, state
-                )
-                message = (
-                    "已开启当前会话的 debug，dump 文件路径会输出到日志。"
-                    if state == "on"
-                    else "已关闭当前会话的 debug，已有 dump 文件保留。"
-                )
+            message = await management.update_debug(
+                event,
+                state,
+                session,
+                config=self.config,
+                settings=self.settings,
+                apply_settings=self._apply_settings,
+                logger=self.logger,
+            )
         yield event.plain_result(message)
+
+    def _apply_settings(self, settings: Settings) -> None:
+        """Publish one saved configuration snapshot without yielding control.
+
+        Args:
+            settings: Immutable snapshot saved under the configuration lock.
+        """
+        self.settings = settings
+        self.scheduler.settings = settings
+        self.scheduler.judge.settings = settings
+        self.history.settings = settings
+        self.debug_dumper.settings = settings
 
     @filter.event_message_type(
         filter.EventMessageType.GROUP_MESSAGE | filter.EventMessageType.PRIVATE_MESSAGE,
@@ -367,6 +289,9 @@ class MinglePlugin(Star):
         Yields:
             A conversation-bound request only for the batch's admitted handler.
         """
+        # ============================================================
+        # 1. Check event eligibility
+        # ============================================================
         is_bubble = isinstance(event, RandomBubbleEvent)
         if is_bubble:
             # Internal triggers must never fall through to ordinary handlers.
@@ -377,6 +302,10 @@ class MinglePlugin(Star):
             return
         if event.get_self_id() == event.get_sender_id():
             return
+
+        # ============================================================
+        # 2. Preserve commands and validate session access
+        # ============================================================
         activated_handlers = []
         if not is_bubble:
             activated_handlers = event.get_extra("activated_handlers", [])
@@ -431,6 +360,9 @@ class MinglePlugin(Star):
                 event.stop_event()
             return
 
+        # ============================================================
+        # 3. Take ownership and persist incoming messages
+        # ============================================================
         ticket = None
         task = asyncio.current_task()
         self.handlers.add(task)
@@ -446,6 +378,10 @@ class MinglePlugin(Star):
                     return
             if not await SessionServiceManager.should_process_llm_request(event):
                 return
+
+            # ============================================================
+            # 4. Submit input and wait for batch admission
+            # ============================================================
             snapshot_end = None
             if is_bubble:
                 if config.get("platform_settings", {}).get("unique_session", False):
@@ -488,6 +424,10 @@ class MinglePlugin(Star):
                     wake=wake_requested,
                 )
                 batch_ids = await ticket.ready
+
+            # ============================================================
+            # 5. Recheck admission and bind the conversation
+            # ============================================================
             if (
                 (not batch_ids and not is_bubble)
                 or not self.available
@@ -509,6 +449,10 @@ class MinglePlugin(Star):
                 conversation_id = await conversation_manager.new_conversation(
                     event.unified_msg_origin, event.get_platform_id()
                 )
+
+            # ============================================================
+            # 6. Run the turn with at most one protocol recovery
+            # ============================================================
             # Run normally first, then allow at most one recovery after history
             # saving. A valid completion or unavailable recovery exits early.
             for attempt in range(2):
@@ -549,6 +493,10 @@ class MinglePlugin(Star):
                     batch_ids = batch_ids + recovery_ids
                     if is_bubble:
                         snapshot_end = max([snapshot_end] + batch_ids)
+
+                # ============================================================
+                # 7. Load history and build the user prompt
+                # ============================================================
                 conversation = await conversation_manager.get_conversation(
                     event.unified_msg_origin, conversation_id
                 )
@@ -561,36 +509,29 @@ class MinglePlugin(Star):
                 timezone = self.context.get_config(umo=event.unified_msg_origin).get(
                     "timezone"
                 )
-                prompt_history = format_prompt_history(recent, timezone)
-                prompt = (
-                    f"New batch record IDs: {batch_ids}. Snapshot ends at record "
-                    f"{snapshot_end if is_bubble else max(batch_ids)}.\n"
-                    + json.dumps(prompt_history, ensure_ascii=False)
-                )
-                if is_bubble:
-                    prompt = self.settings.random_bubble_prompt + "\n\n" + prompt
+                recovery_has_new_messages = False
+                resume_after_rerun = False
                 if is_recovery:
-                    notice = (
-                        "The previous turn did not follow the completion protocol: "
-                        "end with exactly <finished>. Content in the final response "
-                        "is not sent to the user. Review messages already sent "
-                        "successfully and use the send_message_to_user tool to send "
-                        "any remaining replies. Avoid duplicate messages and do not mention this "
-                        "recovery run."
+                    recovery_has_new_messages = bool(recovery_ids)
+                else:
+                    resume_after_rerun = event.get_extra(
+                        "mingle_resume_after_rerun", False
                     )
-                    if recovery_ids:
-                        notice += (
-                            "\nMeanwhile, the following new messages have arrived. "
-                            "You may reply to them separately or together:"
-                        )
-                    prompt = notice + "\n\n" + prompt
-                elif event.get_extra("mingle_resume_after_rerun", False):
-                    prompt = (
-                        "The previous Agent turn was stopped because new messages corrected "
-                        "or redirected the task. Continue from its saved history, apply the "
-                        "new messages below, and reuse completed tool results when relevant.\n\n"
-                        + prompt
-                    )
+                prompt = generation.build_user_prompt(
+                    recent,
+                    batch_ids,
+                    self.settings,
+                    timezone_name=timezone,
+                    is_bubble=is_bubble,
+                    snapshot_end=snapshot_end,
+                    is_recovery=is_recovery,
+                    recovery_has_new_messages=recovery_has_new_messages,
+                    resume_after_rerun=resume_after_rerun,
+                )
+
+                # ============================================================
+                # 8. Initialize and execute the Agent request
+                # ============================================================
                 if event.is_stopped() or event.get_extra("agent_stop_requested", False):
                     return
                 event.set_extra("mingle_turn_id", uuid.uuid4().hex)
@@ -620,6 +561,9 @@ class MinglePlugin(Star):
                 event.unified_msg_origin,
             )
         finally:
+            # ============================================================
+            # 9. Release the handler after pipeline completion
+            # ============================================================
             # Resuming after ProviderRequest means Agent history saving has
             # completed; release the next batch only at this point.
             event.stop_event()
@@ -637,63 +581,14 @@ class MinglePlugin(Star):
         The cursor lives in persisted user prompts so conversation resets and
         plugin restarts follow the same history as the Agent.
         """
-        saved = json.loads(conversation.history or "[]")
-        if snapshot_end is None:
-            snapshot_end = max(batch_ids)
-        cursor = 0
-        for message in saved:
-            if message.get("role") != "user":
-                continue
-            content = message.get("content", "")
-            if isinstance(content, str):
-                texts = [content]
-            elif isinstance(content, list):
-                texts = [
-                    part.get("text", "")
-                    for part in content
-                    if part.get("type") == "text"
-                ]
-            else:
-                texts = []
-            for text in texts:
-                match = re.search(
-                    r"(?:^|\n\n)New batch record IDs: \[(?:\d+(?:, \d+)*)?\]\. Snapshot ends at record (\d+)\.\n",
-                    text,
-                )
-                if match:
-                    cursor = max(cursor, int(match.group(1)))
-        if not saved or (not cursor and not batch_ids):
-            initial = await self.history.get(
-                event.unified_msg_origin,
-                limit=self.settings.initial_context_messages,
-                before_id=snapshot_end + 1,
-                boundary=boundary_group(event),
-            )
-            if not batch_ids or not event.get_extra("mingle_woke_from_sleep", False):
-                return initial
-            # A wake batch can exceed the initial context window. Include its
-            # oldest waiting input as well, while respecting the group boundary.
-            first_id = min(batch_ids)
-            if initial:
-                first_id = min(first_id, initial[0]["id"])
-            cursor = first_id - 1
-        # Existing native conversations have no Mingle snapshot; start at this batch.
-        if saved:
-            if not cursor and batch_ids:
-                cursor = min(batch_ids) - 1
-        records = []
-        while True:
-            page = await self.history.get(
-                event.unified_msg_origin,
-                limit=100,
-                after_id=cursor,
-                before_id=snapshot_end + 1,
-                boundary=boundary_group(event),
-            )
-            records.extend(page)
-            if len(page) < 100:
-                return records
-            cursor = page[-1]["id"]
+        return await generation.load_agent_history(
+            event,
+            conversation,
+            batch_ids,
+            history=self.history,
+            settings=self.settings,
+            snapshot_end=snapshot_end,
+        )
 
     @filter.on_llm_request(priority=-maxsize + 2)
     async def apply_toolbox_switches(
@@ -767,27 +662,7 @@ class MinglePlugin(Star):
         cleaned_histories = []
         removed_counts = []
         for messages in histories:
-            cleaned = []
-            removed = 0
-            for message in messages:
-                content = message.get("content")
-                if not isinstance(content, list):
-                    cleaned.append(message)
-                    continue
-                parts = []
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "image_url":
-                        parts.append(
-                            {
-                                "type": "text",
-                                "text": "[Previous-turn image omitted. Use "
-                                "mingle_view_image to reopen it if cached.]",
-                            }
-                        )
-                        removed += 1
-                    else:
-                        parts.append(part)
-                cleaned.append({**message, "content": parts})
+            cleaned, removed = generation.clean_history_images(messages)
             cleaned_histories.append(cleaned)
             removed_counts.append(removed)
         request.contexts = cleaned_histories[0]
@@ -817,20 +692,8 @@ class MinglePlugin(Star):
             request: Initial plugin-layer request, before per-step compression
                 and provider-specific HTTP serialization.
         """
-        if not self.available or not self.debug_dumper.is_enabled(event):
-            return
-        request_id = uuid.uuid4().hex
-        event.set_extra("mingle_debug_agent_request_id", request_id)
-        await self.debug_dumper.dump(
-            event,
-            "agent",
-            "input",
-            {
-                "request": request,
-                "selected_provider": event.get_extra("selected_provider"),
-                "selected_model": event.get_extra("selected_model"),
-            },
-            request_id,
+        await self.debug_dumper.capture_agent_request(
+            event, request, available=self.available
         )
 
     @filter.on_llm_response(priority=-maxsize)
@@ -843,18 +706,8 @@ class MinglePlugin(Star):
             event: Event carrying the request correlation identifier.
             response: Final response delivered by AstrBot, including error roles.
         """
-        request_id = event.get_extra("mingle_debug_agent_request_id")
-        if not self.available or not request_id:
-            return
-        await self.debug_dumper.dump(
-            event,
-            "agent",
-            "output",
-            {
-                "completion_text": response.completion_text,
-                "response": response,
-            },
-            request_id,
+        await self.debug_dumper.capture_agent_response(
+            event, response, available=self.available
         )
 
     @filter.on_llm_response()

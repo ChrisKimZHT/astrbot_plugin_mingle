@@ -1507,6 +1507,98 @@ async def test_group_management_save_failure_leaves_runtime_unchanged(
     assert plugin.config["general"]["group_sessions"] == ["group"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_command", ["group", "debug"])
+@pytest.mark.parametrize("first_save_fails", [False, True])
+async def test_concurrent_management_commands_share_current_settings_and_save_lock(
+    plugin, monkeypatch, first_command, first_save_fails
+):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    saved_sections = []
+    original_settings = plugin.settings
+    original_save = plugin.config.save_config_async
+    original_apply = plugin._apply_settings
+    plugin.config["general"]["keep_general"] = "unchanged"
+    plugin.config["debug"]["keep_debug"] = "unchanged"
+
+    async def save(config, updates):
+        assert config is plugin.config
+        assert plugin.config_lock.locked()
+        section = next(iter(updates))
+        saved_sections.append(section)
+        if len(saved_sections) == 1:
+            started.set()
+            await release.wait()
+            if first_save_fails:
+                # Saving may mutate the in-memory object before disk IO fails.
+                plugin.config[section] = updates[section]
+                raise OSError("Injected first-save failure")
+        await original_save(updates)
+
+    def apply(settings):
+        assert plugin.config_lock.locked()
+        original_apply(settings)
+
+    # AstrBotConfig attribute assignment writes dictionary entries, so replace
+    # the class method rather than adding a callable to persisted configuration.
+    monkeypatch.setattr(AstrBotConfig, "save_config_async", save)
+    monkeypatch.setattr(plugin, "_apply_settings", apply)
+    event = make_event()
+    if first_command == "group":
+        first_handler = plugin.manage_group(event, "on")
+        second_handler = plugin.manage_debug(event, "on")
+        expected_sections = ["general", "debug"]
+    else:
+        first_handler = plugin.manage_debug(event, "on")
+        second_handler = plugin.manage_group(event, "on")
+        expected_sections = ["debug", "general"]
+    tasks = [asyncio.create_task(anext(first_handler))]
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        assert plugin.settings is original_settings
+        tasks.append(asyncio.create_task(anext(second_handler)))
+        await asyncio.sleep(0)
+        assert saved_sections == expected_sections[:1]
+        assert not tasks[1].done()
+        release.set()
+        replies = await asyncio.wait_for(asyncio.gather(*tasks), 1)
+        assert ("保存配置失败" in replies[0].get_plain_text()) == first_save_fails
+        assert "保存配置失败" not in replies[1].get_plain_text()
+        assert saved_sections == expected_sections
+        group_failed = first_save_fails and first_command == "group"
+        debug_failed = first_save_fails and first_command == "debug"
+        assert (
+            event.unified_msg_origin in plugin.settings.group_sessions
+        ) != group_failed
+        assert (
+            event.unified_msg_origin in plugin.settings.debug_sessions
+        ) != debug_failed
+        assert plugin.scheduler.settings is plugin.settings
+        assert plugin.scheduler.judge.settings is plugin.settings
+        assert plugin.history.settings is plugin.settings
+        assert plugin.debug_dumper.settings is plugin.settings
+        persisted = json.loads(
+            Path(plugin.config.config_path).read_text(encoding="utf-8-sig")
+        )
+        assert persisted["general"]["keep_general"] == "unchanged"
+        assert persisted["debug"]["keep_debug"] == "unchanged"
+        assert persisted["general"]["group_sessions"] == list(
+            plugin.settings.group_sessions
+        )
+        assert persisted["debug"]["debug_sessions"] == list(
+            plugin.settings.debug_sessions
+        )
+    finally:
+        release.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await first_handler.aclose()
+        await second_handler.aclose()
+
+
 def test_management_commands_use_native_group_and_admin_permissions():
     from astrbot.core.star.command_management import _build_descriptor
     from astrbot.core.star.filter.command_group import CommandGroupFilter

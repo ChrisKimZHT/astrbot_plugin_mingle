@@ -42,6 +42,16 @@
 
 - `main.py` owns AstrBot registration, command bypass, request construction,
   response hooks, and thin history/image tool registration methods.
+- `src/generation.py` prepares Agent history, user prompts and historical image
+  replacements with explicit dependencies. Keep the registered listener's direct
+  `yield event.request_llm(...)`, recovery loop, admission ticket and finally
+  release in main.py. Prompt text, snapshot cursors and history boundaries must
+  remain unchanged when moving input preparation.
+- `src/management.py` implements validated group/debug configuration changes and
+  boundary operations. Native registration, permissions, validation and response
+  yielding stay in main.py. Acquire config_lock before capturing current settings;
+  keep it through saving, rollback or synchronous settings publication, and group
+  scheduling updates. Do not cache a settings snapshot in a management service.
 - `src/tools/history.py` and `src/tools/images.py` implement Mingle-required
   function-calling tools. Keep tool names, signatures and model-facing docstrings
   on the registered main.py methods; delegate execution with explicit dependencies.
@@ -226,8 +236,9 @@
   Management commands persist general.group_sessions and debug.debug_sessions
   while preserving other fields in those objects.
 - Keep debugging implementation in `src/debug.py`, including future debug
-  features. `debug_sessions` is an independent list of full UMOs, empty by
-  default. Platform-scoped whole-group UMOs also cover isolated member events.
+  features and Agent request/response capture. Keep decorated hooks and their
+  priorities in main.py. `debug_sessions` is an independent list of full UMOs,
+  empty by default. Platform-scoped whole-group UMOs also cover isolated member events.
   `/mingle debug on|off` is administrator-only and persists the current group
   or private chat setting without enabling normal Mingle chat handling.
 - Debug capture is explicitly at plugin level: decision-model input/output,

@@ -13,6 +13,7 @@ from typing import Literal
 
 from astrbot.api.event import AstrMessageEvent
 from astrbot.core.platform.message_type import MessageType
+from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from pydantic import BaseModel
 
 from .settings import Settings
@@ -174,6 +175,64 @@ class DebugDumper:
             f"{event.get_group_id()}"
         )
         return group_session in self.settings.debug_sessions
+
+    async def capture_agent_request(
+        self,
+        event: AstrMessageEvent,
+        request: ProviderRequest,
+        *,
+        available: bool,
+    ) -> None:
+        """Capture the initial Agent request and retain its correlation ID.
+
+        Args:
+            event: Event defining the debug scope, including unmanaged requests.
+            request: Plugin-layer input observed by the standard request hook.
+            available: Whether the plugin has initialized and remains loaded.
+        """
+        if not available or not self.is_enabled(event):
+            return
+        request_id = uuid.uuid4().hex
+        event.set_extra("mingle_debug_agent_request_id", request_id)
+        await self.dump(
+            event,
+            "agent",
+            "input",
+            {
+                "request": request,
+                "selected_provider": event.get_extra("selected_provider"),
+                "selected_model": event.get_extra("selected_model"),
+            },
+            request_id,
+        )
+
+    async def capture_agent_response(
+        self,
+        event: AstrMessageEvent,
+        response: LLMResponse,
+        *,
+        available: bool,
+    ) -> None:
+        """Capture the raw final response for a previously observed request.
+
+        Args:
+            event: Event carrying the captured request's correlation ID.
+            response: Final framework response, including error roles.
+            available: Whether the plugin has initialized and remains loaded.
+        """
+        request_id = event.get_extra("mingle_debug_agent_request_id")
+        if not available or not request_id:
+            return
+        await self.dump(
+            event,
+            "agent",
+            "output",
+            {
+                "completion_text": response.completion_text,
+                "response": response,
+            },
+            request_id,
+        )
 
     async def dump(
         self,
