@@ -145,6 +145,7 @@ class ChatHistory:
                     )
                 await self.db.commit()
             except BaseException:
+                # Cancellation must also roll back the partial queue replacement.
                 await self.db.rollback()
                 raise
 
@@ -298,6 +299,7 @@ class ChatHistory:
                 await self.db.commit()
                 return removed
             except BaseException:
+                # Keep the transaction atomic even when the caller is cancelled.
                 await self.db.rollback()
                 raise
 
@@ -319,7 +321,8 @@ class ChatHistory:
         Returns:
             Inserted record ID, or None for an empty or duplicate message.
         """
-        parts, images = [], []
+        parts = []
+        images = []
         reply_to = None
         for component in chain:
             if isinstance(component, Plain):
@@ -537,8 +540,9 @@ class ChatHistory:
                 rows = await cursor.fetchall()
             retained = 0
             for row in rows:
+                retention_cutoff = now - self.settings.image_retention_days * 86400
                 keep = (
-                    row["last_seen"] >= now - self.settings.image_retention_days * 86400
+                    row["last_seen"] >= retention_cutoff
                     and retained + row["size"]
                     <= self.settings.image_cache_mb * 1024 * 1024
                 )

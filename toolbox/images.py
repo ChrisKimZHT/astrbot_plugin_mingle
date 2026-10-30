@@ -237,14 +237,23 @@ async def edit_image(
     """
     if not event.get_extra("mingle_managed", False):
         return json.dumps({"error": "Image editing requires a managed Mingle turn."})
-    if (
+    invalid_references = (
         not isinstance(record_ids, list)
         or not isinstance(image_indices, list)
         or not 1 <= len(record_ids) <= 4
         or len(record_ids) != len(image_indices)
-        or any(type(value) is not int or value <= 0 for value in record_ids)
-        or any(type(value) is not int or value < 0 for value in image_indices)
-    ):
+    )
+    if not invalid_references:
+        for record_id in record_ids:
+            if type(record_id) is not int or record_id <= 0:
+                invalid_references = True
+                break
+    if not invalid_references:
+        for image_index in image_indices:
+            if type(image_index) is not int or image_index < 0:
+                invalid_references = True
+                break
+    if invalid_references:
         return json.dumps(
             {
                 "error": "Supply one to four record IDs and matching nonnegative image indices."

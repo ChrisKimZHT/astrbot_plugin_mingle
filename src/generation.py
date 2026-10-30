@@ -114,24 +114,27 @@ def remove_message_turns(messages: list[dict], record: dict) -> tuple[list[dict]
         if request_start is None:
             continue
         if record["role"] == "bot":
-            matches = record["source_key"].startswith(f"bot:{turn_id}:sent:")
-        else:
-            batch_ids = json.loads(request_match["batch_ids"])
-            matches = record["id"] in batch_ids
-            if not matches:
-                try:
-                    records, _ = json.JSONDecoder().raw_decode(
-                        request_text[request_match.end() :]
-                    )
-                except ValueError:
-                    records = []
-                if isinstance(records, list):
-                    matches = any(
-                        isinstance(item, dict) and item.get("id") == record["id"]
-                        for item in records
-                    )
-        if matches:
+            if record["source_key"].startswith(f"bot:{turn_id}:sent:"):
+                selected_runs.add(run_id)
+            continue
+        batch_ids = json.loads(request_match["batch_ids"])
+        if record["id"] in batch_ids:
             selected_runs.add(run_id)
+            continue
+        try:
+            records, _ = json.JSONDecoder().raw_decode(
+                request_text[request_match.end() :]
+            )
+        except ValueError:
+            continue
+        if not isinstance(records, list):
+            continue
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            if item.get("id") == record["id"]:
+                selected_runs.add(run_id)
+                break
     ranges = []
     for start, end, run_id in turns:
         if run_id not in selected_runs:

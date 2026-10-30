@@ -23,16 +23,17 @@ def format_prompt_history(
         display_timezone = timezone.utc
     records = []
     for message in messages:
-        record = {
-            key: deepcopy(value)
-            for key, value in message.items()
-            if key not in {"platform_message_id", "is_new", "sent_to_agent"}
-        }
+        record = {}
+        for key, value in message.items():
+            if key in {"platform_message_id", "is_new", "sent_to_agent"}:
+                continue
+            record[key] = deepcopy(value)
         if "timestamp" in record:
             try:
-                record["timestamp"] = datetime.fromtimestamp(
+                timestamp = datetime.fromtimestamp(
                     record["timestamp"], tz=display_timezone
-                ).isoformat(sep=" ", timespec="seconds")
+                )
+                record["timestamp"] = timestamp.isoformat(sep=" ", timespec="seconds")
             except (TypeError, ValueError, OverflowError, OSError):
                 record["timestamp"] = None
         if record.get("sender_id") is not None:

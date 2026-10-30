@@ -37,12 +37,12 @@ def dumper(tmp_path):
 @pytest.mark.asyncio
 async def test_dump_files_are_correlated_unique_and_paths_logged(dumper, event, caplog):
     with caplog.at_level(logging.INFO, logger="mingle.debug.test"):
-        paths = await asyncio.gather(
-            *[
+        requests = []
+        for phase in ("input", "output", "output"):
+            requests.append(
                 dumper.dump(event, "judge", phase, {"message": "你好"}, "request-1")
-                for phase in ("input", "output", "output")
-            ]
-        )
+            )
+        paths = await asyncio.gather(*requests)
     assert len(set(paths)) == 3
     for path in paths:
         assert path.is_absolute()

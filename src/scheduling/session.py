@@ -249,7 +249,9 @@ class SessionCoordinator:
                     ticket.release()
                 else:
                     pending.append(ticket)
-            state.pending = sorted(waiting_messages(pending), key=lambda t: t.record_id)
+            state.pending = sorted(
+                waiting_messages(pending), key=lambda ticket: ticket.record_id
+            )
             state.judging = []
             approved = []
             for ticket in state.approved:
@@ -333,7 +335,11 @@ class SessionCoordinator:
             state.finished.pop(next(iter(state.finished)))
 
     async def run(self) -> None:
-        """Wait for notifications or the nearest useful deadline without polling."""
+        """Wait for notifications or the nearest useful deadline without polling.
+
+        Unexpected scheduling failures release waiting handlers so they cannot
+        remain blocked on a coordinator that has exited.
+        """
         state = self.state
         try:
             while not self.scheduler.closed:

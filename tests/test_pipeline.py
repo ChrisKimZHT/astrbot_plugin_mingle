@@ -1302,13 +1302,13 @@ async def test_rerun_uses_framework_stop_signal_and_saves_before_replacement(plu
         assert first.get_extra("agent_stop_requested") is True
         assert second.get_extra("mingle_resume_after_rerun") is True
         judgment = json.loads(plugin.context.llm_generate.call_args.kwargs["prompt"])
-        assert any(item["status"] == "processing" for item in judgment["messages"])
+        processing_messages = [
+            item for item in judgment["messages"] if item["status"] == "processing"
+        ]
+        assert processing_messages
         assert any(item["status"] == "new" for item in judgment["messages"])
         assert "running_agent" not in judgment
-        assert any(
-            item["status"] == "processing" and item["text"] == "message 1"
-            for item in judgment["messages"]
-        )
+        assert any(item["text"] == "message 1" for item in processing_messages)
     finally:
         first_task.cancel()
         second_task.cancel()
@@ -1479,12 +1479,11 @@ async def test_group_boundary_overwrite_and_private_rejection(plugin):
 async def test_barrier_keyword_parses_native_command_and_keeps_matched_message(plugin):
     from astrbot.core.star.star_handler import star_handlers_registry
 
+    module_handlers = star_handlers_registry.get_handlers_by_module_name(
+        MinglePlugin.__module__
+    )
     handler = next(
-        item
-        for item in star_handlers_registry.get_handlers_by_module_name(
-            MinglePlugin.__module__
-        )
-        if item.handler_name == "manage_barrier"
+        item for item in module_handlers if item.handler_name == "manage_barrier"
     )
     command = next(
         item for item in handler.event_filters if isinstance(item, CommandFilter)
@@ -1582,12 +1581,11 @@ async def test_delete_command_removes_latest_match_and_all_linked_turns(
     plugin.context.conversation_manager.update_conversation = AsyncMock(
         side_effect=save
     )
+    module_handlers = star_handlers_registry.get_handlers_by_module_name(
+        MinglePlugin.__module__
+    )
     handler = next(
-        item
-        for item in star_handlers_registry.get_handlers_by_module_name(
-            MinglePlugin.__module__
-        )
-        if item.handler_name == "delete_message"
+        item for item in module_handlers if item.handler_name == "delete_message"
     )
     command = next(
         item for item in handler.event_filters if isinstance(item, CommandFilter)
@@ -1866,7 +1864,8 @@ async def test_group_management_persists_and_updates_all_runtime_settings(plugin
     assert persisted["general"]["group_sessions"] == ["group", "p:GroupMessage:group"]
     assert persisted["general"]["enabled"] is True
     assert persisted["general"]["private_enabled"] is True
-    [value async for value in plugin.manage_group(event, "on")]
+    async for _ in plugin.manage_group(event, "on"):
+        pass
     assert plugin.config["general"]["group_sessions"].count("p:GroupMessage:group") == 1
     plugin.config["general"]["group_sessions"].append("other:GroupMessage:other")
     disabled = [value async for value in plugin.manage_group(event, "off")]
@@ -2100,7 +2099,8 @@ async def test_version_command_matches_installed_metadata(plugin):
 
 @pytest.mark.asyncio
 async def test_group_enable_applies_to_isolated_members_and_platform_scope(plugin):
-    [value async for value in plugin.manage_group(make_event(), "on")]
+    async for _ in plugin.manage_group(make_event(), "on"):
+        pass
     isolated = make_event("2")
     isolated.session_id = "bob_group"
     plugin.scheduler.sessions[isolated.unified_msg_origin] = SessionState()
@@ -2131,7 +2131,8 @@ async def test_debug_command_persists_current_chat_and_updates_runtime(plugin, p
     )
     assert persisted["debug"]["debug_sessions"] == [event.unified_msg_origin]
     assert plugin.settings.group_sessions == original_groups
-    [value async for value in plugin.manage_debug(event, "on")]
+    async for _ in plugin.manage_debug(event, "on"):
+        pass
     assert plugin.config["debug"]["debug_sessions"] == [event.unified_msg_origin]
     results = [value async for value in plugin.manage_debug(event, "off")]
     assert "已关闭" in results[0].get_plain_text()
@@ -2166,7 +2167,8 @@ async def test_agent_debug_hooks_capture_request_and_final_response_outside_mana
     plugin, role
 ):
     event = make_event()
-    [value async for value in plugin.manage_debug(event, "on")]
+    async for _ in plugin.manage_debug(event, "on"):
+        pass
     assert not event.get_extra("mingle_managed")
     request = ProviderRequest(
         prompt="Original question",
@@ -2177,10 +2179,9 @@ async def test_agent_debug_hooks_capture_request_and_final_response_outside_mana
     request.prompt = "Changed after the capture"
     response = LLMResponse(role=role, completion_text="Final model result")
     await plugin.dump_agent_response(event, response)
-    documents = [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in plugin.debug_dumper.directory.rglob("*.json")
-    ]
+    documents = []
+    for path in plugin.debug_dumper.directory.rglob("*.json"):
+        documents.append(json.loads(path.read_text(encoding="utf-8")))
     assert len(documents) == 2
     assert len({item["request_id"] for item in documents}) == 1
     assert {item["kind"] for item in documents} == {"agent"}
@@ -2198,9 +2199,11 @@ async def test_agent_debug_hooks_capture_request_and_final_response_outside_mana
 @pytest.mark.asyncio
 async def test_debug_off_stops_new_dumps_without_removing_existing_files(plugin):
     event = make_event(private=True)
-    [value async for value in plugin.manage_debug(event, "on")]
+    async for _ in plugin.manage_debug(event, "on"):
+        pass
     await plugin.dump_agent_request(event, ProviderRequest(prompt="question"))
-    [value async for value in plugin.manage_debug(event, "off")]
+    async for _ in plugin.manage_debug(event, "off"):
+        pass
     await plugin.dump_agent_response(
         event, LLMResponse(role="assistant", completion_text="answer")
     )
@@ -2239,7 +2242,8 @@ async def test_group_off_during_busy_judgment_does_not_stop_active_agent(plugin)
     second_task = asyncio.create_task(anext(plugin.on_message(make_event("2"))))
     try:
         await asyncio.wait_for(started.wait(), 1)
-        [value async for value in plugin.manage_group(make_event("command"), "off")]
+        async for _ in plugin.manage_group(make_event("command"), "off"):
+            pass
         release.set()
         await wait_for_judgment(plugin.scheduler.sessions[first.unified_msg_origin])
         result = await asyncio.gather(second_task, return_exceptions=True)
@@ -2266,11 +2270,9 @@ async def test_history_tool_returns_stored_records(plugin):
 async def test_management_invalid_action_does_not_change_settings(plugin, subcommand):
     original = plugin.settings
     kwargs = {"keyword": ""} if subcommand == "barrier" else {}
+    command_handler = getattr(plugin, f"manage_{subcommand}")
     results = [
-        value
-        async for value in getattr(plugin, f"manage_{subcommand}")(
-            make_event(), "unknown", **kwargs
-        )
+        value async for value in command_handler(make_event(), "unknown", **kwargs)
     ]
     assert "用法" in results[0].get_plain_text()
     assert plugin.settings is original
@@ -2281,12 +2283,11 @@ async def test_management_invalid_action_does_not_change_settings(plugin, subcom
 async def test_management_subcommands_parse_and_bypass_mingle(plugin, subcommand):
     from astrbot.core.star.star_handler import star_handlers_registry
 
+    module_handlers = star_handlers_registry.get_handlers_by_module_name(
+        MinglePlugin.__module__
+    )
     handler = next(
-        item
-        for item in star_handlers_registry.get_handlers_by_module_name(
-            MinglePlugin.__module__
-        )
-        if item.handler_name == f"manage_{subcommand}"
+        item for item in module_handlers if item.handler_name == f"manage_{subcommand}"
     )
     command = next(
         item for item in handler.event_filters if isinstance(item, CommandFilter)
@@ -2297,9 +2298,10 @@ async def test_management_subcommands_parse_and_bypass_mingle(plugin, subcommand
     for state in ("on", "off"):
         event.message_str = f"mingle {subcommand} {state}"
         assert command.filter(event, {})
+        command_handler = getattr(plugin, f"manage_{subcommand}")
         results = [
             value
-            async for value in getattr(plugin, f"manage_{subcommand}")(
+            async for value in command_handler(
                 event, **event.get_extra("parsed_params")
             )
         ]
@@ -2556,12 +2558,10 @@ async def test_history_image_cleanup_does_not_affect_unmanaged_requests(plugin):
 def test_history_image_cleanup_runs_before_request_debug_capture():
     from astrbot.core.star.star_handler import star_handlers_registry
 
-    handlers = {
-        item.handler_name: item
-        for item in star_handlers_registry.get_handlers_by_module_name(
-            MinglePlugin.__module__
-        )
-    }
+    module_handlers = star_handlers_registry.get_handlers_by_module_name(
+        MinglePlugin.__module__
+    )
+    handlers = {item.handler_name: item for item in module_handlers}
     assert handlers["clear_history_images"].extras_configs.get(
         "priority", 0
     ) > handlers["dump_agent_request"].extras_configs.get("priority", 0)
@@ -2802,12 +2802,10 @@ async def test_image_tool_missing_selection_does_not_choose_another_provider(plu
 def test_toolbox_switches_run_before_request_debug_capture():
     from astrbot.core.star.star_handler import star_handlers_registry
 
-    handlers = {
-        item.handler_name: item
-        for item in star_handlers_registry.get_handlers_by_module_name(
-            MinglePlugin.__module__
-        )
-    }
+    module_handlers = star_handlers_registry.get_handlers_by_module_name(
+        MinglePlugin.__module__
+    )
+    handlers = {item.handler_name: item for item in module_handlers}
     assert (
         handlers["apply_toolbox_switches"].extras_configs["priority"]
         > handlers["dump_agent_request"].extras_configs["priority"]
@@ -3001,13 +2999,10 @@ async def test_whisper_discards_entire_message_before_history(
     from astrbot.core.star.filter.permission import PermissionTypeFilter
     from astrbot.core.star.star_handler import star_handlers_registry
 
-    metadata = next(
-        item
-        for item in star_handlers_registry.get_handlers_by_module_name(
-            MinglePlugin.__module__
-        )
-        if item.handler_name == name
+    module_handlers = star_handlers_registry.get_handlers_by_module_name(
+        MinglePlugin.__module__
     )
+    metadata = next(item for item in module_handlers if item.handler_name == name)
     assert not any(
         isinstance(item, PermissionTypeFilter) for item in metadata.event_filters
     )

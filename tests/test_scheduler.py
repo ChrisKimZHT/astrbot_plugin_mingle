@@ -1153,12 +1153,14 @@ async def test_busy_judgment_includes_active_messages_outside_recent_window():
     records = [{"id": 1, "text": "Original task"}, {"id": 2, "text": "Correction"}]
 
     async def get(session, *, limit, before_id=None, after_id=None):
-        return [
-            record
-            for record in records
-            if (before_id is None or record["id"] < before_id)
-            and (after_id is None or record["id"] > after_id)
-        ][-limit:]
+        matching_records = []
+        for record in records:
+            if before_id is not None and record["id"] >= before_id:
+                continue
+            if after_id is not None and record["id"] <= after_id:
+                continue
+            matching_records.append(record)
+        return matching_records[-limit:]
 
     judge = SimpleNamespace(
         evaluate=AsyncMock(return_value=ReplyDecision(True, "rerun"))

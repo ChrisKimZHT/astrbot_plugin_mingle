@@ -284,10 +284,9 @@ async def test_busy_context_is_explicit_without_changing_the_system_prefix(
         "new",
         "history",
     ]
-    assert all(
-        "is_new" not in item and "sent_to_agent" not in item
-        for item in payload["messages"]
-    )
+    for item in payload["messages"]:
+        assert "is_new" not in item
+        assert "sent_to_agent" not in item
     assert [item["id"] for item in payload["messages"] if item["status"] == "new"] == [
         4
     ]
@@ -399,12 +398,11 @@ async def test_parallel_two_level_vote(
         return values[0]
 
     monkeypatch.setattr("mingle_tests_plugin.src.decision.random.choice", choose)
-    context.llm_generate.side_effect = [
-        SimpleNamespace(
-            completion_text=json.dumps({"should_reply": reply, "action": action})
-        )
-        for reply, action in votes
-    ]
+    responses = []
+    for reply, action in votes:
+        completion = json.dumps({"should_reply": reply, "action": action})
+        responses.append(SimpleNamespace(completion_text=completion))
+    context.llm_generate.side_effect = responses
     judge = ReplyJudge(
         context, Settings(judge_parallel_requests=len(votes)), logging.getLogger()
     )

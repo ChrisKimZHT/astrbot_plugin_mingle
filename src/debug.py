@@ -32,11 +32,12 @@ def _serialize_debug_value(value: object) -> object:
         return value.model_dump(mode="python")
     if is_dataclass(value) and not isinstance(value, type):
         # Handlers can retain the entire plugin context; never deepcopy them.
-        return {
-            field.name: getattr(value, field.name)
-            for field in fields(value)
-            if field.name not in {"handler", "handler_module_path"}
-        }
+        serialized_fields = {}
+        for field in fields(value):
+            if field.name in {"handler", "handler_module_path"}:
+                continue
+            serialized_fields[field.name] = getattr(value, field.name)
+        return serialized_fields
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, Path):

@@ -361,9 +361,6 @@ class MinglePlugin(Star):
         Yields:
             A conversation-bound request only for the batch's admitted handler.
         """
-        # ============================================================
-        # 1. Check event eligibility
-        # ============================================================
         is_internal = isinstance(event, RandomBubbleEvent)
         backlog_ticket = (
             event.get_extra("mingle_backlog_ticket") if is_internal else None
@@ -379,20 +376,13 @@ class MinglePlugin(Star):
         if event.get_self_id() == event.get_sender_id():
             return
 
-        # ============================================================
-        # 2. Preserve commands and validate session access
-        # ============================================================
         activated_handlers = []
         if not is_internal:
             activated_handlers = event.get_extra("activated_handlers", [])
         for handler in activated_handlers:
-            is_whisper_handler = getattr(
-                handler, "handler_module_path", None
-            ) == self.__module__ and handler.handler_name in {
-                "whisper",
-                "whisper_alias",
-            }
-            if is_whisper_handler:
+            if getattr(handler, "handler_module_path", None) != self.__module__:
+                continue
+            if handler.handler_name in {"whisper", "whisper_alias"}:
                 await self.whisper(event)
                 return
         group_session = (
@@ -436,9 +426,6 @@ class MinglePlugin(Star):
                 event.stop_event()
             return
 
-        # ============================================================
-        # 3. Take ownership and persist incoming messages
-        # ============================================================
         ticket = None
         task = asyncio.current_task()
         self.handlers.add(task)
@@ -455,9 +442,6 @@ class MinglePlugin(Star):
             if not await SessionServiceManager.should_process_llm_request(event):
                 return
 
-            # ============================================================
-            # 4. Submit input and wait for batch admission
-            # ============================================================
             snapshot_end = None
             if backlog_ticket is not None:
                 ticket = backlog_ticket
@@ -504,9 +488,6 @@ class MinglePlugin(Star):
                 )
                 batch_ids = await ticket.ready
 
-            # ============================================================
-            # 5. Recheck admission and bind the conversation
-            # ============================================================
             if (
                 (not batch_ids and not is_bubble)
                 or not self.available
@@ -530,9 +511,6 @@ class MinglePlugin(Star):
                     event.unified_msg_origin, event.get_platform_id()
                 )
 
-            # ============================================================
-            # 6. Run the turn with at most one protocol recovery
-            # ============================================================
             # Run normally first, then allow at most one recovery after history
             # saving. A valid completion or unavailable recovery exits early.
             run_id = uuid.uuid4().hex
@@ -575,9 +553,6 @@ class MinglePlugin(Star):
                     if is_bubble:
                         snapshot_end = max([snapshot_end] + batch_ids)
 
-                # ============================================================
-                # 7. Load history and build the user prompt
-                # ============================================================
                 conversation = await conversation_manager.get_conversation(
                     event.unified_msg_origin, conversation_id
                 )
@@ -610,9 +585,6 @@ class MinglePlugin(Star):
                     resume_after_rerun=resume_after_rerun,
                 )
 
-                # ============================================================
-                # 8. Initialize and execute the Agent request
-                # ============================================================
                 if event.is_stopped() or event.get_extra("agent_stop_requested", False):
                     return
                 turn_id = uuid.uuid4().hex
@@ -644,9 +616,6 @@ class MinglePlugin(Star):
                 event.unified_msg_origin,
             )
         finally:
-            # ============================================================
-            # 9. Release the handler after pipeline completion
-            # ============================================================
             # Resuming after ProviderRequest means Agent history saving has
             # completed; release the next batch only at this point.
             event.stop_event()
@@ -693,11 +662,11 @@ class MinglePlugin(Star):
             "mingle_edit_image": self.settings.toolbox_image_edit_enabled,
         }
         disabled = set()
-        for name, individual in enabled.items():
+        for name, tool_enabled in enabled.items():
             if (
                 not self.available
                 or not self.settings.toolbox_enabled
-                or not individual
+                or not tool_enabled
             ):
                 disabled.add(name)
         if disabled:

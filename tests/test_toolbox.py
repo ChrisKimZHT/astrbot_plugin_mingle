@@ -96,7 +96,9 @@ def test_random_integer_bounds_and_candidates():
     result = json.loads(draw_random(-3, 3, 100))
     assert result["mode"] == "integer"
     assert len(result["results"]) == 100
-    assert all(type(value) is int and -3 <= value <= 3 for value in result["results"])
+    for value in result["results"]:
+        assert type(value) is int
+        assert -3 <= value <= 3
     assert json.loads(draw_random(2, 2, 3))["results"] == [2, 2, 2]
     choices = ["甲", "乙", "丙"]
     result = json.loads(draw_random(count=3, choices=choices))
