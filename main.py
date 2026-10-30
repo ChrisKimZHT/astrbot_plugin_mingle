@@ -138,7 +138,6 @@ class MinglePlugin(Star):
         """Discard a whisper sent through the short command."""
         await self.whisper(event)
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @mingle.command("sleep", desc="让当前群聊立即睡眠，@ 或关键词唤醒")
     async def sleep(
         self, event: AstrMessageEvent
@@ -154,7 +153,6 @@ class MinglePlugin(Star):
         self.scheduler.sleep(event.unified_msg_origin)
         yield event.plain_result("当前会话已进入睡眠，直接 @ 或唤醒关键词可唤醒。")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("s", desc="/mingle sleep 的简写")
     async def sleep_alias(
         self, event: AstrMessageEvent
@@ -164,7 +162,9 @@ class MinglePlugin(Star):
             yield result
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @mingle.command("barrier", desc="管理群聊记录边界：set 设置，find 查看，clear 清除")
+    @mingle.command(
+        "barrier", desc="🔒 管理群聊记录边界：set 设置，find 查看，clear 清除"
+    )
     async def manage_barrier(
         self, event: AstrMessageEvent, action: str
     ) -> AsyncGenerator[MessageEventResult, None]:
@@ -190,7 +190,7 @@ class MinglePlugin(Star):
         yield event.plain_result(message).use_markdown(False)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @mingle.command("group", desc="开启或关闭当前群聊：on|off")
+    @mingle.command("group", desc="🔒 开启或关闭当前群聊：on|off")
     async def manage_group(
         self, event: AstrMessageEvent, state: str
     ) -> AsyncGenerator[MessageEventResult, None]:
@@ -228,7 +228,7 @@ class MinglePlugin(Star):
         yield event.plain_result(message)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @mingle.command("debug", desc="开启或关闭当前会话调试：on|off")
+    @mingle.command("debug", desc="🔒 开启或关闭当前会话调试：on|off")
     async def manage_debug(
         self, event: AstrMessageEvent, state: str
     ) -> AsyncGenerator[MessageEventResult, None]:

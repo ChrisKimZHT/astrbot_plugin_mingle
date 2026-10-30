@@ -127,8 +127,8 @@
   prefixes alone do not. The wake batch must be judged, with all retained pending
   records included and only its latest message marked new; the others are history.
   A positive vote admits the complete waiting batch, including records beyond an
-  empty conversation's initial context limit. /mingle sleep and /s use native
-  administrator permissions and do not enter chat storage or scheduling. Sleep
+  empty conversation's initial context limit. /mingle sleep and /s are available
+  to all members and do not enter chat storage or scheduling. Sleep
   invalidates in-flight judgments and prevents recovery from claiming sleeping work.
 - scheduler.sleep_backlog_minutes (default 30, zero disables) schedules a
   conservative review of bounded sleeping backlog without waking on arrivals.
@@ -274,8 +274,9 @@
   scheduling them. Recognized commands bypass this gate. Disabling the plugin
   restores native framework behavior.
 - Register `/mingle` through AstrBot's native command_group with group, debug
-  and barrier subcommands. Keep all management handlers administrator-only; the root group is public
-  so all members can use `/mingle whisper`. Register `/w` as its standalone
+  and barrier subcommands. Keep group, debug and barrier administrator-only;
+  prefix their descriptions with 🔒 so native command-group help identifies them.
+  The root group, version, whisper and sleep are public. Register `/w` as whisper's standalone
   shorthand. Both silently stop the entire event before Mingle storage or
   scheduling, including empty bodies and attachments, without calling models. Use the framework's command parsing and help rendering;
   do not patch the framework command-group help renderer. Put permission

@@ -659,8 +659,9 @@ async def test_sleep_only_wakes_for_direct_bot_mention_or_literal_keyword(plugin
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name,text", [("sleep", "mingle sleep"), ("sleep_alias", "s")])
 @pytest.mark.parametrize("private", [False, True])
-async def test_sleep_commands_use_native_admin_filters_and_bypass_storage(
-    plugin, name, text, private
+@pytest.mark.parametrize("role", ["member", "admin"])
+async def test_sleep_commands_allow_all_members_and_bypass_storage(
+    plugin, name, text, private, role
 ):
     from astrbot.core.star.filter.permission import PermissionTypeFilter
     from astrbot.core.star.star_handler import star_handlers_registry
@@ -669,20 +670,16 @@ async def test_sleep_commands_use_native_admin_filters_and_bypass_storage(
         MinglePlugin.__module__
     )
     metadata = next(item for item in plugin_handlers if item.handler_name == name)
-    permission = next(
-        item
-        for item in metadata.event_filters
-        if isinstance(item, PermissionTypeFilter)
+    assert not any(
+        isinstance(item, PermissionTypeFilter) for item in metadata.event_filters
     )
     command = next(
         item for item in metadata.event_filters if isinstance(item, CommandFilter)
     )
     event = make_event(private=private)
-    assert not permission.filter(event, {})
-    event.role = "admin"
+    event.role = role
     event.message_str = text
     event.is_at_or_wake_command = True
-    assert permission.filter(event, {})
     assert command.filter(event, {})
     event.set_extra("activated_handlers", [metadata])
     assert [value async for value in plugin.on_message(event)] == []
@@ -1599,7 +1596,8 @@ async def test_concurrent_management_commands_share_current_settings_and_save_lo
         await second_handler.aclose()
 
 
-def test_management_commands_use_native_group_and_admin_permissions():
+@pytest.mark.parametrize("role", ["member", "admin"])
+def test_management_commands_use_native_group_and_admin_permissions(role):
     from astrbot.core.star.command_management import _build_descriptor
     from astrbot.core.star.filter.command_group import CommandGroupFilter
     from astrbot.core.star.filter.permission import PermissionType, PermissionTypeFilter
@@ -1625,7 +1623,7 @@ def test_management_commands_use_native_group_and_admin_permissions():
         isinstance(item, PermissionTypeFilter) for item in root.event_filters
     )
     event = make_event()
-    event.role = "admin"
+    event.role = role
     event.is_at_or_wake_command = True
     event.message_str = "mingle"
     with pytest.raises(ValueError) as error:
@@ -1648,14 +1646,27 @@ def test_management_commands_use_native_group_and_admin_permissions():
         for item in version_command.get_handler_md().event_filters
     )
     assert root.desc == "管理 Mingle 群聊、调试和记录边界"
+    help_text = str(error.value)
+    admin_commands = {"group", "debug", "barrier"}
     for command in group.sub_command_filters:
-        if command.command_name in {"whisper", "version"}:
-            continue
         handler = command.get_handler_md()
         assert handler.extras_configs.get("sub_command") is True
         descriptor = _build_descriptor(handler)
         assert descriptor.is_sub_command
         assert descriptor.parent_group_handler == root.handler_full_name
+        help_line = next(
+            line
+            for line in help_text.splitlines()
+            if line.startswith(f"├── {command.command_name} ")
+        )
+        if command.command_name not in admin_commands:
+            assert "🔒" not in help_line
+            assert not any(
+                isinstance(item, PermissionTypeFilter) for item in handler.event_filters
+            )
+            continue
+        assert "🔒 " in help_line
+        assert "管理员" not in help_line
         permission = next(
             item
             for item in handler.event_filters
