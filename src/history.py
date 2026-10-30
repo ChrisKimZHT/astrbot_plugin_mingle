@@ -116,14 +116,39 @@ class ChatHistory:
         """)
         await self.db.commit()
 
-    async def set_boundary(self, group: str) -> tuple[int, float]:
-        """Set a group boundary after all records already assigned an ID."""
+    async def set_boundary(
+        self, group: str, *, session: str = "", keyword: str = ""
+    ) -> tuple[int, float] | None:
+        """Set a boundary at the end of history or before the latest text match.
+
+        Args:
+            group: Platform-scoped group owning the boundary.
+            session: Current full UMO to search when a keyword is supplied.
+            keyword: Optional literal substring, using the history search's
+                case-insensitive matching across all retained session records.
+
+        Returns:
+            Exclusive lower record bound and set time, or None when the keyword
+            does not match. A missing match leaves the existing boundary intact.
+        """
         async with self.lock:
-            async with self.db.execute(
-                "SELECT seq FROM sqlite_sequence WHERE name='messages'"
-            ) as cursor:
-                row = await cursor.fetchone()
-            record_id = row[0] if row else 0
+            if keyword:
+                async with self.db.execute(
+                    "SELECT id FROM messages WHERE session=? "
+                    "AND instr(lower(text), lower(?)) > 0 "
+                    "ORDER BY id DESC LIMIT 1",
+                    (session, keyword),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    return None
+                record_id = row[0] - 1
+            else:
+                async with self.db.execute(
+                    "SELECT seq FROM sqlite_sequence WHERE name='messages'"
+                ) as cursor:
+                    row = await cursor.fetchone()
+                record_id = row[0] if row else 0
             set_at = time.time()
             await self.db.execute(
                 "INSERT OR REPLACE INTO boundaries VALUES (?, ?, ?)",

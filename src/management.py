@@ -18,6 +18,7 @@ async def manage_boundary(
     action: str,
     group: str,
     *,
+    keyword: str = "",
     history: ChatHistory,
     get_config: Callable[..., dict],
     logger: logging.Logger,
@@ -28,6 +29,7 @@ async def manage_boundary(
         event: Administrator command defining the session used for previews.
         action: Validated set, find, or clear operation.
         group: Platform-scoped group boundary identifier.
+        keyword: Optional text to place the boundary before the latest match.
         history: Independent Mingle storage.
         get_config: Resolver for the current AstrBot session timezone.
         logger: Plugin logger for storage or formatting failures.
@@ -37,7 +39,17 @@ async def manage_boundary(
     """
     try:
         if action == "set":
-            record_id, set_at = await history.set_boundary(group)
+            boundary = await history.set_boundary(
+                group, session=event.unified_msg_origin, keyword=keyword
+            )
+            if boundary is None:
+                return "当前会话保留的聊天记录中未找到匹配消息，群聊记录边界未更改。"
+            record_id, set_at = boundary
+            if keyword:
+                return (
+                    "已设置群聊记录边界：位于最新匹配消息的上方，"
+                    "该消息及之后的消息可见。"
+                )
             return f"已设置群聊记录边界：记录 ID {record_id} 之后的消息可见。"
         if action == "clear":
             removed = await history.clear_boundary(group)

@@ -84,6 +84,40 @@ async def test_deduplication_pagination_and_scope(history):
 
 
 @pytest.mark.asyncio
+async def test_keyword_boundary_searches_hidden_records_and_preserves_first_match(
+    history,
+):
+    group = "p:GroupMessage:g"
+    first_id = await history.record(Event("first"), [Plain("Topic 100%_literal")])
+    await history.record(Event("gap", "other"), [Plain("unrelated")])
+    await history.record(Event("later"), [Plain("Topic 100XXliteral")])
+    await history.record(
+        Event("member", "p:GroupMessage:alice_g"), [Plain("Topic 100%_literal")]
+    )
+    await history.set_boundary(group)
+    assert await history.get(group, boundary=group) == []
+
+    boundary = await history.set_boundary(
+        group, session=group, keyword="topic 100%_literal"
+    )
+    assert boundary[0] == first_id - 1 == 0
+    assert [row["id"] for row in await history.get(group, boundary=group)][
+        0
+    ] == first_id
+    before, after = await history.boundary_preview(group, group)
+    assert before is None
+    assert after["text"] == "Topic 100%_literal"
+    await history.close()
+    await history.initialize()
+    assert await history.get_boundary(group) == boundary
+
+    assert await history.set_boundary(group, session=group, keyword="absent") is None
+    assert await history.get_boundary(group) == boundary
+    assert await history.set_boundary("unset", session="empty", keyword="Topic") is None
+    assert await history.get_boundary("unset") is None
+
+
+@pytest.mark.asyncio
 async def test_record_count_retention_and_reply_identity(history):
     history.settings = replace(history.settings, max_messages_per_session=2)
     for number in range(4):

@@ -291,6 +291,12 @@
   settings. On failure restore the in-memory config. Waiting events recheck
   the allowlist before requesting an Agent; active turns are not interrupted.
 - `/mingle barrier set|find|clear` is administrator-only and group-only.
+  `set` without a keyword places the boundary after all assigned records.
+  `set <keyword>` searches all retained records of the current full UMO from
+  newest to oldest using literal, case-insensitive substring matching, including
+  records hidden by an existing boundary. Place the boundary immediately before
+  the latest match so that message remains visible. No match preserves the
+  existing boundary. Accept multiword keywords through native GreedyStr parsing.
   `find` shows the current session’s nearest retained message on either side,
   each prefixed by its timestamp in the session timezone (UTC fallback), with
   text limited to 25 characters including the ellipsis, separated by `--- barrier ---`; missing sides

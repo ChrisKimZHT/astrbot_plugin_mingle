@@ -13,7 +13,7 @@ from astrbot.core.message.components import At, Plain
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
-from astrbot.core.star.filter.command import CommandFilter
+from astrbot.core.star.filter.command import CommandFilter, GreedyStr
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 from mcp.types import CallToolResult
@@ -163,14 +163,17 @@ class MinglePlugin(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @mingle.command(
-        "barrier", desc="🔒 管理群聊记录边界：set 设置，find 查看，clear 清除"
+        "barrier", desc="🔒 管理群聊记录边界：set [关键词] 设置，find 查看，clear 清除"
     )
     async def manage_barrier(
-        self, event: AstrMessageEvent, action: str
+        self, event: AstrMessageEvent, action: str, keyword: GreedyStr
     ) -> AsyncGenerator[MessageEventResult, None]:
         """Manage the current group's persistent Mingle history visibility boundary."""
-        if action not in {"set", "find", "clear"}:
-            yield event.plain_result("用法：/mingle barrier set|find|clear")
+        keyword = keyword.strip()
+        if action not in {"set", "find", "clear"} or (action != "set" and keyword):
+            yield event.plain_result(
+                "用法：/mingle barrier set [关键词] | find | clear"
+            )
             return
         group = boundary_group(event)
         if group is None:
@@ -183,6 +186,7 @@ class MinglePlugin(Star):
             event,
             action,
             group,
+            keyword=keyword,
             history=self.history,
             get_config=self.context.get_config,
             logger=self.logger,
