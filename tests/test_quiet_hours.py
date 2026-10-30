@@ -138,7 +138,7 @@ async def test_queued_bubble_entering_quiet_hours_is_invalidated(clocks, monkeyp
 async def test_backlog_skips_quiet_review_and_keeps_next_regular_slot(clocks):
     judge = SimpleNamespace(should_reply=AsyncMock(return_value=False))
     scheduler = ChatScheduler(
-        Settings(debounce_seconds=0),
+        Settings(debounce_seconds=0, sleep_backlog_minutes=30),
         SimpleNamespace(get=AsyncMock(return_value=[])),
         judge,
         logging.getLogger(),
@@ -189,7 +189,7 @@ async def test_backlog_crossing_quiet_start_retains_tickets(clocks, crossing):
         return True
 
     scheduler = ChatScheduler(
-        Settings(debounce_seconds=0),
+        Settings(debounce_seconds=0, sleep_backlog_minutes=30),
         SimpleNamespace(get=AsyncMock(side_effect=get_history)),
         SimpleNamespace(should_reply=AsyncMock(side_effect=should_reply)),
         logging.getLogger(),

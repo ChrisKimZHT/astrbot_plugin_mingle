@@ -169,6 +169,7 @@ async def test_random_bubble_timer_enters_agent_with_reference_backlog(
     plugin.settings = replace(
         plugin.settings,
         random_bubble_enabled=True,
+        random_bubble_min_minutes=30,
         initial_context_messages=1,
         sleep_backlog_minutes=0,
     )
@@ -416,7 +417,12 @@ async def test_timed_backlog_send_resets_random_bubble_clock(plugin, monkeypatch
     monkeypatch.setattr(
         "mingle_tests_plugin.src.scheduling.timing.expovariate", lambda _: 5400
     )
-    plugin.settings = replace(plugin.settings, random_bubble_enabled=True)
+    plugin.settings = replace(
+        plugin.settings,
+        random_bubble_enabled=True,
+        random_bubble_min_minutes=30,
+        sleep_backlog_minutes=30,
+    )
     plugin.scheduler.settings = plugin.settings
     plugin.scheduler.queue_bubble = AsyncMock()
     plugin.context.llm_generate.return_value.completion_text = '{"should_reply": true}'
@@ -546,6 +552,7 @@ async def test_sleep_backlog_uses_real_history_and_send_hook(
     plugin.settings = replace(
         plugin.settings,
         initial_context_messages=1,
+        sleep_backlog_minutes=30,
         judge_parallel_requests=1,
         judge_wake_parallel_requests=3,
     )

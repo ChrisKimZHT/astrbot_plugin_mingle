@@ -202,8 +202,8 @@ class Settings:
     judge_parallel_requests: int = 1
     judge_wake_parallel_requests: int = 1
     random_bubble_enabled: bool = False
-    random_bubble_min_minutes: float = 30.0
-    random_bubble_mean_minutes: float = 120.0
+    random_bubble_min_minutes: float = 120.0
+    random_bubble_mean_minutes: float = 240.0
     random_bubble_prompt: str = DEFAULT_RANDOM_BUBBLE_PROMPT
     judge_timeout: float = 20.0
     generator_prompt: str = DEFAULT_GENERATOR_PROMPT
@@ -212,7 +212,7 @@ class Settings:
     max_wait_seconds: float = 6.0
     cooldown_seconds: float = 3.0
     sleep_minutes: float = 5.0
-    sleep_backlog_minutes: float = 30.0
+    sleep_backlog_minutes: float = 60.0
     quiet_hours_start: str = "22:00"
     quiet_hours_end: str = "10:00"
     sleep_wake_keywords: tuple[str, ...] = ()

@@ -235,7 +235,12 @@ async def test_recovery_preserves_sleep_check_after_waiting_for_proactive_turn(
         "mingle_tests_plugin.src.scheduling.timing.monotonic", lambda: clock.now
     )
     scheduler = ChatScheduler(
-        Settings(random_bubble_enabled=True, debounce_seconds=0, sleep_minutes=0.1),
+        Settings(
+            random_bubble_enabled=True,
+            debounce_seconds=0,
+            sleep_minutes=0.1,
+            sleep_backlog_minutes=30,
+        ),
         SimpleNamespace(get=AsyncMock(return_value=[])),
         SimpleNamespace(evaluate=AsyncMock(return_value=ReplyDecision(True))),
         logging.getLogger(),

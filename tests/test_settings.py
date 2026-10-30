@@ -138,7 +138,7 @@ def test_grouped_settings_load_custom_values():
 
 def test_sleep_settings():
     assert Settings().sleep_minutes == 5
-    assert Settings().sleep_backlog_minutes == 30
+    assert Settings().sleep_backlog_minutes == 60
     settings = Settings.from_config(
         {
             "scheduler": {
@@ -189,8 +189,8 @@ def test_parallel_request_count_configuration():
 
 def test_random_bubble_configuration():
     assert not Settings().random_bubble_enabled
-    assert Settings().random_bubble_min_minutes == 30
-    assert Settings().random_bubble_mean_minutes == 120
+    assert Settings().random_bubble_min_minutes == 120
+    assert Settings().random_bubble_mean_minutes == 240
     settings = Settings.from_config(
         {
             "experimental": {

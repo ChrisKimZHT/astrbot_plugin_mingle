@@ -20,7 +20,12 @@ async def test_bubble_clock_tracks_actual_sends_not_sleep_or_arrivals(monkeypatc
     draw = Mock(return_value=5400)
     monkeypatch.setattr("mingle_tests_plugin.src.scheduling.timing.expovariate", draw)
     scheduler = ChatScheduler(
-        Settings(random_bubble_enabled=True, sleep_backlog_minutes=0),
+        Settings(
+            random_bubble_enabled=True,
+            random_bubble_min_minutes=30,
+            random_bubble_mean_minutes=120,
+            sleep_backlog_minutes=0,
+        ),
         SimpleNamespace(get=AsyncMock(return_value=[])),
         SimpleNamespace(should_reply=AsyncMock(return_value=False)),
         logging.getLogger(),
@@ -569,7 +574,7 @@ async def test_sleep_backlog_interval_does_not_restart_on_arrivals(clock, interv
 async def test_sleep_backlog_waits_for_active_pipeline(clock):
     judge = SimpleNamespace(should_reply=AsyncMock(return_value=True))
     scheduler = ChatScheduler(
-        Settings(debounce_seconds=0),
+        Settings(debounce_seconds=0, sleep_backlog_minutes=30),
         SimpleNamespace(get=AsyncMock(return_value=[])),
         judge,
         logging.getLogger(),
@@ -608,7 +613,7 @@ async def test_sleep_backlog_discards_stale_review_on_state_transition(
 
     judge = SimpleNamespace(should_reply=AsyncMock(side_effect=should_reply))
     scheduler = ChatScheduler(
-        Settings(debounce_seconds=0),
+        Settings(debounce_seconds=0, sleep_backlog_minutes=30),
         SimpleNamespace(get=AsyncMock(return_value=[])),
         judge,
         logging.getLogger(),

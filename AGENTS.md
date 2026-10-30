@@ -130,7 +130,7 @@
   empty conversation's initial context limit. /mingle sleep and /s are available
   to all members and do not enter chat storage or scheduling. Sleep
   invalidates in-flight judgments and prevents recovery from claiming sleeping work.
-- scheduler.sleep_backlog_minutes (default 30, zero disables) schedules a
+- scheduler.sleep_backlog_minutes (default 60, zero disables) schedules a
   conservative review of bounded sleeping backlog without waking on arrivals.
   Count from sleep entry or the previous review, wait for any active Agent to
   unwind, and make no requests without pending input. Use wake judgment
@@ -450,7 +450,7 @@ be verified separately with configured credentials; tests do not contact them.
 
 - Experimental settings appear in the final experimental (实验功能) group.
   Random proactive group turns use random_bubble_enabled (default false),
-  random_bubble_min_minutes (30), and random_bubble_mean_minutes (120) here.
+  random_bubble_min_minutes (120), and random_bubble_mean_minutes (240) here.
   random_bubble_prompt is configurable in the same experimental group. Keep
   its English schema default synchronized with DEFAULT_RANDOM_BUBBLE_PROMPT
   in settings. Use the configured text verbatim, followed by two newlines and

@@ -30,19 +30,19 @@
       "debounce_seconds": {
         "type": "float",
         "default": 2.0,
-        "description": "连续消息合并等待（秒）",
+        "description": "⭐️ 连续消息合并等待（秒）",
         "hint": "收到新消息后等待这段时间，将连续消息合并处理。"
       },
       "max_wait_seconds": {
         "type": "float",
         "default": 6.0,
-        "description": "最长合并等待（秒）",
+        "description": "⭐️ 最长合并等待（秒）",
         "hint": "从本批首条消息计时，须不小于上方的合并等待。到期后仍需等待冷却结束。"
       },
       "cooldown_seconds": {
         "type": "float",
         "default": 3.0,
-        "description": "主动接话冷却（秒）",
+        "description": "⭐️ 主动接话冷却（秒）",
         "hint": "每轮回复结束后，暂停主动接话判断；期间消息继续合并。私聊、直接唤醒和回复运行期间的判断不受限制。0 关闭。"
       },
       "sleep_minutes": {
@@ -53,7 +53,7 @@
       },
       "sleep_backlog_minutes": {
         "type": "float",
-        "default": 30.0,
+        "default": 60.0,
         "description": "睡眠积压队列处理间隔（分钟）",
         "hint": "从进入睡眠或上次检查计时，定期判断积压消息，倾向保持安静；有回复正在运行时等其结束。无积压不调用模型，无需回复的批次不再检查。成功发送回复后才解除睡眠。0 关闭。"
       },
@@ -292,13 +292,13 @@
       },
       "random_bubble_min_minutes": {
         "type": "float",
-        "default": 30,
+        "default": 120,
         "description": "冒泡最短间隔（分钟）",
         "hint": "从最后一次 Agent 成功发送开始计时，等待此时长后，再叠加指数分布的随机等待。重启后重新计时，不补发错过的机会。"
       },
       "random_bubble_mean_minutes": {
         "type": "float",
-        "default": 120,
+        "default": 240,
         "description": "冒泡平均间隔（分钟）",
         "hint": "必须大于最短间隔。随机等待的均值为两者之差；实际触发还会等待当前 Agent 完成，并被期间成功发送的消息重新计时。"
       },
