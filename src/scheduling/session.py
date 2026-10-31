@@ -72,7 +72,11 @@ class SessionCoordinator:
             timing.monotonic() if received_at is None else received_at,
             finished=CompletionSignal(state.changed),
         )
-        if self.scheduler.closed:
+        deleted_record = (
+            state.deleted_through_id is not None
+            and record_id <= state.deleted_through_id
+        )
+        if self.scheduler.closed or deleted_record:
             ticket.release()
             return ticket
         self.check_sleep()
@@ -222,15 +226,18 @@ class SessionCoordinator:
                 ticket.release()
         self.notify()
 
-    def end_history_edit(self, deleted_id: int | None) -> None:
+    def end_history_edit(
+        self, deleted_id: int | None, *, deleted_through_id: int | None = None
+    ) -> None:
         """Release a history reservation and discard stale judgment input.
 
         Args:
             deleted_id: Deleted record whose waiting ticket must be released,
                 or None when the edit did not change either history.
+            deleted_through_id: Successful session deletion's record high-water mark.
         """
         state = self.state
-        if deleted_id is not None:
+        if deleted_id is not None or deleted_through_id is not None:
             attempt = self.attempt
             if attempt is not None:
                 if attempt.waking and not attempt.sleep_backlog:
@@ -245,7 +252,10 @@ class SessionCoordinator:
                 self.attempt = None
             pending = []
             for ticket in state.pending + state.judging:
-                if ticket.record_id == deleted_id:
+                if ticket.record_id == deleted_id or (
+                    deleted_through_id is not None
+                    and ticket.record_id <= deleted_through_id
+                ):
                     ticket.release()
                 else:
                     pending.append(ticket)
@@ -255,13 +265,22 @@ class SessionCoordinator:
             state.judging = []
             approved = []
             for ticket in state.approved:
-                if ticket.record_id == deleted_id:
+                if ticket.record_id == deleted_id or (
+                    deleted_through_id is not None
+                    and ticket.record_id <= deleted_through_id
+                ):
                     ticket.release()
                 else:
                     approved.append(ticket)
             state.approved = approved
             state.finished.pop(deleted_id, None)
             self.bound_pending(preserve_forced=True)
+        if deleted_through_id is not None:
+            state.deleted_through_id = deleted_through_id
+            state.finished.clear()
+            state.resume_after_rerun = False
+            self.proactive.reset_deadline(timing.monotonic())
+            self.scheduler.persist_sleep_backlog(self.key)
         state.history_editing = False
         self.notify()
 

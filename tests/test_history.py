@@ -168,6 +168,45 @@ async def test_find_and_delete_are_literal_session_scoped_and_keep_shared_images
 
 
 @pytest.mark.asyncio
+async def test_delete_session_is_exact_cascades_backlog_and_preserves_shared_cache(
+    history, tmp_path
+):
+    group = "p:GroupMessage:g"
+    member = "p:GroupMessage:alice_g"
+    image = tmp_path / "session-source.png"
+    image.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII="
+        )
+    )
+    group_id = await history.record(Event("group"), [Image.fromFileSystem(image)])
+    member_id = await history.record(
+        Event("member", member), [Image.fromFileSystem(image)]
+    )
+    await history.save_sleep_backlog(group, [(group_id, "g", "bot", 100.0)])
+    await history.save_sleep_backlog(member, [(member_id, "g", "bot", 101.0)])
+    boundary = await history.set_boundary(group)
+    assert await history.list_sessions() == sorted([group, member])
+
+    assert await history.delete_session(member) == member_id
+    assert await history.get(member) == []
+    assert await history.get_boundary(group) == boundary
+    assert [row["record_id"] for row in await history.get_sleep_backlog()] == [group_id]
+    assert await history.read_image(group, group_id, 0) is not None
+
+    assert await history.delete_session(group) == member_id
+    assert await history.list_sessions() == []
+    assert await history.get_sleep_backlog() == []
+    assert await history.get_boundary(group) is None
+    assert len(list(history.images.iterdir())) == 1
+    new_id = await history.record(Event("new"), [Plain("new session")])
+    assert new_id > member_id
+    await history.close()
+    await history.initialize()
+    assert [row["id"] for row in await history.get(group)] == [new_id]
+
+
+@pytest.mark.asyncio
 async def test_image_cache_dedup_expiration_and_cross_session_access(history, tmp_path):
     image = tmp_path / "source.png"
     data = base64.b64decode(

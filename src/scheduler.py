@@ -296,16 +296,25 @@ class ChatScheduler:
         coordinator.notify()
         return True
 
-    def end_history_edit(self, key: str, deleted_id: int | None) -> None:
+    def end_history_edit(
+        self,
+        key: str,
+        deleted_id: int | None,
+        *,
+        deleted_through_id: int | None = None,
+    ) -> None:
         """Resume coordination and invalidate work that saw a deleted record.
 
         Args:
             key: Session whose edit reservation is held by the caller.
             deleted_id: Successfully deleted record, or None if nothing changed.
+            deleted_through_id: High-water mark for a successful full-session deletion.
         """
         coordinator = self._coordinators.get(key)
         if coordinator is not None:
-            coordinator.end_history_edit(deleted_id)
+            coordinator.end_history_edit(
+                deleted_id, deleted_through_id=deleted_through_id
+            )
 
     async def close(self) -> None:
         """Release waiting handlers, cancel owned work, and stop active events."""

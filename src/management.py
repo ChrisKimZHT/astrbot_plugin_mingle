@@ -18,6 +18,105 @@ from .settings import Settings
 from .utils.history_formatting import format_prompt_history
 
 
+async def list_sessions(
+    current_session: str,
+    *,
+    history: ChatHistory,
+    scheduler: ChatScheduler,
+    conversation_manager: ConversationManager,
+    logger: logging.Logger,
+) -> str:
+    """List distinct full UMOs without loading native Agent message histories.
+
+    Args:
+        current_session: Command's full UMO, used only to mark the current entry.
+        history: Independent Mingle storage.
+        scheduler: Live session coordinator owner.
+        conversation_manager: Native paginated conversation metadata API.
+        logger: Plugin logger.
+
+    Returns:
+        Sorted session identifiers or a user-facing failure message.
+    """
+    try:
+        sessions = set(await history.list_sessions())
+        for key, state in scheduler.sessions.items():
+            if (
+                state.deleted_through_id is None
+                or state.pending
+                or state.judging
+                or state.approved
+                or state.active is not None
+            ):
+                sessions.add(key)
+        page = 1
+        page_size = 100
+        while True:
+            (
+                conversations,
+                total,
+            ) = await conversation_manager.get_filtered_conversations(
+                page=page, page_size=page_size, include_history=False
+            )
+            for conversation in conversations:
+                sessions.add(conversation.user_id)
+            if page * page_size >= total or not conversations:
+                break
+            page += 1
+        if not sessions:
+            return "暂无会话。"
+        lines = [f"会话列表（共 {len(sessions)} 个，使用完整 UMO 删除）："]
+        for session in sorted(sessions):
+            marker = "🟢" if session == current_session else "⚪"
+            lines.append(f"{marker} {session}")
+        return "\n".join(lines)
+    except Exception:
+        logger.exception("Failed to list Mingle and Agent sessions")
+        return "获取会话列表失败，请查看日志。"
+
+
+async def delete_session(
+    session: str,
+    *,
+    history: ChatHistory,
+    scheduler: ChatScheduler,
+    conversation_manager: ConversationManager,
+    logger: logging.Logger,
+) -> tuple[str, int | None]:
+    """Delete native conversations and retained Mingle data under native locking.
+
+    The caller reserves the idle coordinator until this operation returns. Native
+    deletion uses AstrBot's public API, including selected-conversation cleanup.
+    The two databases cannot share a transaction; report partial failure explicitly.
+
+    Args:
+        session: Validated full UMO, defaulted to the command's session by caller.
+        history: Independent Mingle storage.
+        scheduler: Owner of serialized sleeping-backlog writes.
+        conversation_manager: Native API for deleting all conversations of a UMO.
+        logger: Plugin logger.
+
+    Returns:
+        User-facing outcome and deletion high-water mark, or None on failure.
+    """
+    async with session_lock_manager.acquire_lock(session):
+        agent_deleted = False
+        try:
+            await scheduler.flush_sleep_backlog(session)
+            await conversation_manager.delete_conversations_by_user_id(session)
+            agent_deleted = True
+            deleted_through_id = await history.delete_session(session)
+            return (
+                f"已删除会话 {session} 的 Mingle 记录及全部 Agent 对话历史。",
+                deleted_through_id,
+            )
+        except Exception:
+            logger.exception("Failed to delete session %s", session)
+            if agent_deleted:
+                return "Agent 历史已删除，但 Mingle 会话清理失败，请重试。", None
+            return "删除会话失败，部分数据可能已删除，请查看日志并重试。", None
+
+
 async def delete_message(
     event: AstrMessageEvent,
     keyword: str,

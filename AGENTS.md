@@ -313,6 +313,16 @@
   history tool and image tool to records after it, including isolated member
   sessions. Clearing restores access to retained records. Do not change AstrBot's
   conversation history or the judgment-model history.
+- `/mingle session list|del [full UMO]` is administrator-only. List distinct known
+  full UMOs from retained Mingle data, live scheduling and native conversation
+  metadata. Deletion defaults to the current full UMO and removes its Mingle
+  records, linked sleeping backlog, own boundary and all native Agent conversations
+  through ConversationManager. Reserve an idle coordinator and hold the native
+  session lock; reject active managed turns. Invalidate stale judgments, release
+  deleted tickets and reject late submissions through the deletion high-water
+  mark, while preserving subsequent arrivals. Keep allowlist/debug configuration
+  and shared cached images under their existing policies. Report partial failures
+  across the independent databases explicitly.
 - `/mingle delete <keyword>` is administrator-only and matches the latest literal
   case-insensitive substring in the current full UMO, including multiword input
   through native GreedyStr. Delete only the selected Mingle row and its complete

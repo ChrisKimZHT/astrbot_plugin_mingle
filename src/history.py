@@ -303,6 +303,48 @@ class ChatHistory:
                 await self.db.rollback()
                 raise
 
+    async def list_sessions(self) -> list[str]:
+        """List full UMOs with retained records or a persistent group boundary."""
+        async with self.lock:
+            async with self.db.execute(
+                "SELECT session FROM messages UNION "
+                "SELECT group_session FROM boundaries ORDER BY 1"
+            ) as cursor:
+                rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+    async def delete_session(self, session: str) -> int:
+        """Delete one full UMO's records, linked backlog and own group boundary.
+
+        Shared cached images remain subject to ordinary retention. A boundary
+        keyed by a different group UMO is preserved for isolated member sessions.
+
+        Args:
+            session: Exact administrator-selected full UMO.
+
+        Returns:
+            Global record high-water mark at deletion, covering late submissions
+            of already deleted records while retaining subsequent arrivals.
+        """
+        async with self.lock:
+            try:
+                async with self.db.execute(
+                    "SELECT seq FROM sqlite_sequence WHERE name='messages'"
+                ) as cursor:
+                    row = await cursor.fetchone()
+                deleted_through_id = row[0] if row else 0
+                await self.db.execute(
+                    "DELETE FROM messages WHERE session=?", (session,)
+                )
+                await self.db.execute(
+                    "DELETE FROM boundaries WHERE group_session=?", (session,)
+                )
+                await self.db.commit()
+                return deleted_through_id
+            except BaseException:
+                await self.db.rollback()
+                raise
+
     async def record(
         self,
         event: AstrMessageEvent,

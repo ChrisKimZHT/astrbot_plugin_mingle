@@ -97,3 +97,4 @@ class SessionState:
     bubble_revision: int = 0
     resume_after_rerun: bool = False
     history_editing: bool = False
+    deleted_through_id: int | None = None

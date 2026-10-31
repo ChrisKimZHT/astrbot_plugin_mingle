@@ -159,6 +159,21 @@ class MinglePlugin(Star):
     def mingle(self):
         """Manage Mingle group access, debugging and history boundaries."""
 
+    @mingle.command("sleep", desc="让当前群聊立即睡眠，@ 或关键词唤醒")
+    async def sleep(
+        self, event: AstrMessageEvent
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """Put the current session to sleep without interrupting its active Agent."""
+        event.should_call_llm(True)
+        if not self.available or not self.settings.enabled:
+            yield event.plain_result("Mingle 尚未启用或初始化完成。")
+            return
+        if event.is_private_chat():
+            yield event.plain_result("私聊不使用睡眠机制，请在群聊中使用此命令。")
+            return
+        self.scheduler.sleep(event.unified_msg_origin)
+        yield event.plain_result("当前会话已进入睡眠，直接 @ 或唤醒关键词可唤醒。")
+
     @mingle.command("version", desc=f"查看版本：Mingle {VERSION}")
     async def show_version(
         self, event: AstrMessageEvent
@@ -176,21 +191,6 @@ class MinglePlugin(Star):
     async def whisper_alias(self, event: AstrMessageEvent) -> None:
         """Discard a whisper sent through the short command."""
         await self.whisper(event)
-
-    @mingle.command("sleep", desc="让当前群聊立即睡眠，@ 或关键词唤醒")
-    async def sleep(
-        self, event: AstrMessageEvent
-    ) -> AsyncGenerator[MessageEventResult, None]:
-        """Put the current session to sleep without interrupting its active Agent."""
-        event.should_call_llm(True)
-        if not self.available or not self.settings.enabled:
-            yield event.plain_result("Mingle 尚未启用或初始化完成。")
-            return
-        if event.is_private_chat():
-            yield event.plain_result("私聊不使用睡眠机制，请在群聊中使用此命令。")
-            return
-        self.scheduler.sleep(event.unified_msg_origin)
-        yield event.plain_result("当前会话已进入睡眠，直接 @ 或唤醒关键词可唤醒。")
 
     @filter.command("s", desc="/mingle sleep 的简写")
     async def sleep_alias(
@@ -231,6 +231,41 @@ class MinglePlugin(Star):
             logger=self.logger,
         )
         yield event.plain_result(message).use_markdown(False)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @mingle.command("debug", desc="🔒 开启或关闭当前会话调试：on|off")
+    async def manage_debug(
+        self, event: AstrMessageEvent, state: str
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """Enable or disable debug dumps in the current group or private chat.
+
+        Args:
+            event: Administrator command defining the current chat.
+            state: Either on or off.
+
+        Yields:
+            The persisted debug setting result or usage guidance.
+        """
+        if state not in {"on", "off"}:
+            yield event.plain_result("用法：/mingle debug on 或 /mingle debug off")
+            return
+        session = event.unified_msg_origin
+        if not event.is_private_chat() and event.get_group_id():
+            session = (
+                f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:"
+                f"{event.get_group_id()}"
+            )
+        async with self.config_lock:
+            message = await management.update_debug(
+                event,
+                state,
+                session,
+                config=self.config,
+                settings=self.settings,
+                apply_settings=self._apply_settings,
+                logger=self.logger,
+            )
+        yield event.plain_result(message)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @mingle.command("delete", desc="🔒 删除最新匹配消息及其 Agent 整轮历史：关键词")
@@ -300,39 +335,67 @@ class MinglePlugin(Star):
         yield event.plain_result(message)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @mingle.command("debug", desc="🔒 开启或关闭当前会话调试：on|off")
-    async def manage_debug(
-        self, event: AstrMessageEvent, state: str
+    @mingle.command(
+        "session", desc="🔒 管理会话：list 列出，del [完整 UMO] 删除（默认当前会话）"
+    )
+    async def manage_session(
+        self, event: AstrMessageEvent, action: str, session: GreedyStr
     ) -> AsyncGenerator[MessageEventResult, None]:
-        """Enable or disable debug dumps in the current group or private chat.
-
-        Args:
-            event: Administrator command defining the current chat.
-            state: Either on or off.
-
-        Yields:
-            The persisted debug setting result or usage guidance.
-        """
-        if state not in {"on", "off"}:
-            yield event.plain_result("用法：/mingle debug on 或 /mingle debug off")
+        """List known sessions or delete one session and all its Agent history."""
+        session = session.strip()
+        if action not in {"list", "del"} or (action == "list" and session):
+            yield event.plain_result("用法：/mingle session list | del [完整 UMO]")
             return
-        session = event.unified_msg_origin
-        if not event.is_private_chat() and event.get_group_id():
-            session = (
-                f"{event.get_platform_id()}:{MessageType.GROUP_MESSAGE.value}:"
-                f"{event.get_group_id()}"
-            )
-        async with self.config_lock:
-            message = await management.update_debug(
-                event,
-                state,
-                session,
-                config=self.config,
-                settings=self.settings,
-                apply_settings=self._apply_settings,
+        if not self.available:
+            yield event.plain_result("Mingle 存储尚未就绪。")
+            return
+        if action == "list":
+            message = await management.list_sessions(
+                event.unified_msg_origin,
+                history=self.history,
+                scheduler=self.scheduler,
+                conversation_manager=self.context.conversation_manager,
                 logger=self.logger,
             )
-        yield event.plain_result(message)
+            yield event.plain_result(message).use_markdown(False)
+            return
+        session = session or event.unified_msg_origin
+        try:
+            parsed = MessageSession.from_str(session)
+            if not parsed.platform_id or not parsed.session_id:
+                raise ValueError("Empty session identity")
+        except ValueError:
+            yield event.plain_result(
+                "请使用完整会话 UMO，可通过 /mingle session list 查看。"
+            )
+            return
+        if not self.scheduler.begin_history_edit(session):
+            yield event.plain_result("目标会话正在回复或管理历史，请稍后重试。")
+            return
+        deleted_through_id = None
+        handler_task = asyncio.current_task()
+        self.handlers.add(handler_task)
+        operation = asyncio.create_task(
+            management.delete_session(
+                session,
+                history=self.history,
+                scheduler=self.scheduler,
+                conversation_manager=self.context.conversation_manager,
+                logger=self.logger,
+            )
+        )
+        try:
+            message, deleted_through_id = await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            # Finish both stores before releasing admission, including on unload.
+            _, deleted_through_id = await operation
+            raise
+        finally:
+            self.scheduler.end_history_edit(
+                session, None, deleted_through_id=deleted_through_id
+            )
+            self.handlers.discard(handler_task)
+        yield event.plain_result(message).use_markdown(False)
 
     def _apply_settings(self, settings: Settings) -> None:
         """Publish one saved configuration snapshot without yielding control.
